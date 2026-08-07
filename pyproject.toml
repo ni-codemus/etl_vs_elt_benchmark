@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bench-monitoring-rce"
+version = "0.1.0"
+description = "Mini-projet autonome de benchmark ETL/ELT avec monitoring PostgreSQL"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "psycopg[binary]==3.3.3",
+    "psutil==7.0.0",
+    "PyYAML==6.0.3",
+    "python-dotenv==1.2.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+bench-monitor-init-db = "bench_monitoring.init_db:__name__"
+bench-monitor-generate = "bench_monitoring.generate_data_set:main"
+bench-monitor-etl = "bench_monitoring.etl:main"
+bench-monitor-elt = "bench_monitoring.elt:main"
+bench-monitor-run = "bench_monitoring.monitor_runner:main"
+bench-monitor-series = "bench_monitoring.series_runner:main"

@@ -1,0 +1,40 @@
+# Python cache and build artifacts
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+venv/
+.venv/
+
+# IDE/editor settings
+.idea/
+.vscode/
+
+# Local environment and secrets
+.env
+configs/.env
+
+# Logs and runtime outputs
+logs/
+*.log
+
+# Generated benchmark data and results
+data/generated/
+results/
+
+# Terraform local state and secrets
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/terraform.tfvars
+
+# OS files
+.DS_Store
+Thumbs.db

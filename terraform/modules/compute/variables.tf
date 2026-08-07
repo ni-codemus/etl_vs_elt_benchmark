@@ -90,6 +90,18 @@ variable "pg_app_elt" {
   description = "PostgreSQL application_name used by ELT jobs"
 }
 
+variable "s3_results_bucket" {
+  type        = string
+  description = "S3 bucket used to store benchmark series archives"
+  default     = "my-tfstate-project1-nicode-202506"
+}
+
+variable "s3_results_key_prefix" {
+  type        = string
+  description = "S3 key prefix used for benchmark series archives"
+  default     = "bench-monitor-series"
+}
+
 variable "tags" {
   type        = map(string)
   description = "Common tags applied to all compute resources"

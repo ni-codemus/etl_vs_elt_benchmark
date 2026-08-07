@@ -24,8 +24,10 @@ data "aws_ami" "amazon_linux_2023" {
 }
 
 locals {
-  name_prefix = var.project_name
-  common_tags = var.tags
+  name_prefix            = var.project_name
+  common_tags            = var.tags
+  s3_archive_bucket_arn  = "arn:aws:s3:::${var.s3_results_bucket}"
+  s3_archive_objects_arn = "arn:aws:s3:::${var.s3_results_bucket}/${trim(var.s3_results_key_prefix, "/")}/*"
 }
 
 resource "aws_iam_role" "ec2" {
@@ -50,6 +52,29 @@ resource "aws_iam_role" "ec2" {
 resource "aws_iam_role_policy_attachment" "ssm_core" {
   role       = aws_iam_role.ec2.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_role_policy" "s3_series_archive" {
+  name = "${local.name_prefix}-s3-series-archive"
+  role = aws_iam_role.ec2.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ListSeriesArchiveBucket"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = local.s3_archive_bucket_arn
+      },
+      {
+        Sid      = "ManageSeriesArchiveObjects"
+        Effect   = "Allow"
+        Action   = ["s3:PutObject", "s3:DeleteObject"]
+        Resource = local.s3_archive_objects_arn
+      }
+    ]
+  })
 }
 
 resource "aws_iam_instance_profile" "ec2" {

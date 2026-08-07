@@ -6,6 +6,8 @@ import os
 import shlex
 import subprocess
 import sys
+import tarfile
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +63,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-root", default="data/generated", help="Directory where generated datasets are written")
     parser.add_argument("--results-root", default="results/series", help="Directory where series results are written")
     parser.add_argument("--series-name", default="default", help="Name stored in the series manifest")
+    parser.add_argument("--s3-bucket", default=os.getenv("BENCH_RESULTS_S3_BUCKET", "my-tfstate-project1-nicode-202506"), help="S3 bucket used to store the results archive")
+    parser.add_argument("--s3-key-prefix", default=os.getenv("BENCH_RESULTS_S3_KEY_PREFIX", "bench-monitor-series"), help="S3 key prefix for the uploaded archive")
+    parser.add_argument("--skip-s3-upload", action="store_true", help="Skip the final S3 archive upload")
     parser.add_argument("--continue-on-error", action="store_true", help="Continue with the next volume if one run fails")
     return parser
 
@@ -139,6 +144,17 @@ def run_monitored_benchmark(command_name: str, app_name: str, out_dir: Path, dat
         str(out_dir),
     ]
     run_command(command, env=env, cwd=project_root)
+
+
+def create_results_archive(results_root: Path, archive_path: Path) -> None:
+    with tarfile.open(archive_path, "w:gz") as archive:
+        archive.add(results_root, arcname=results_root.name)
+
+
+def upload_archive_to_s3(archive_path: Path, bucket: str, key: str) -> None:
+    object_uri = f"s3://{bucket}/{key}"
+    subprocess.run(["aws", "s3", "rm", object_uri], cwd=str(project_root), check=False)
+    run_command(["aws", "s3", "cp", str(archive_path), object_uri], cwd=project_root)
 
 
 def main() -> None:
@@ -227,6 +243,24 @@ def main() -> None:
         series_manifest["volumes"].append(volume_entry)
 
     write_json(results_root / "series_manifest.json", series_manifest)
+
+    if not args.skip_s3_upload:
+        archive_name = f"{args.series_name}.tar.gz"
+        s3_key_prefix = args.s3_key_prefix.strip("/")
+        s3_key = f"{s3_key_prefix}/{archive_name}" if s3_key_prefix else archive_name
+        with tempfile.TemporaryDirectory(prefix="bench_series_archive_") as tmp_dir:
+            archive_path = Path(tmp_dir) / archive_name
+            print(f"[INFO] Creating results archive from {results_root}")
+            create_results_archive(results_root, archive_path)
+            print(f"[INFO] Uploading archive to s3://{args.s3_bucket}/{s3_key}")
+            upload_archive_to_s3(archive_path, args.s3_bucket, s3_key)
+        series_manifest["s3_archive"] = {
+            "bucket": args.s3_bucket,
+            "key": s3_key,
+            "source": str(results_root),
+        }
+        write_json(results_root / "series_manifest.json", series_manifest)
+
     print(f"[OK] Series manifest written to {results_root / 'series_manifest.json'}")
 
 

@@ -90,6 +90,16 @@ bench-monitor-series --nb-des 30 100 300 --replications 3 --results-root ./resul
 
 Chaque réplication utilise une graine différente mais reproductible, et les résultats sont rangés par volume puis par réplication.
 
+Par défaut, la fin de `bench-monitor-series` crée une archive `.tar.gz` du répertoire de résultats de la série, supprime l'objet S3 cible s'il existe déjà, puis l'envoie vers le bucket `my-tfstate-project1-nicode-202506`.
+
+```bash
+bench-monitor-series --nb-des 30 100 300 --results-root ./results/series --data-root ./data/generated --s3-bucket my-tfstate-project1-nicode-202506
+```
+
+Si tu veux désactiver l'envoi S3, ajoute `--skip-s3-upload`.
+
+Pour écrire et écraser un fichier dans S3 avec cette approche, le droit IAM minimal est `s3:PutObject` sur la clé cible, et `s3:DeleteObject` si tu veux supprimer explicitement l'objet avant de le réécrire. `s3:ListBucket` n'est utile que si tu veux lister ou vérifier l'existence avant upload.
+
 Pour comparer plusieurs variantes sur les mêmes données:
 
 ```bash

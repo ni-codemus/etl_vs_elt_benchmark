@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any, cast
 
 from .config import PROJECT_ROOT
 from .database import DatabaseConnexion
@@ -20,6 +23,94 @@ class ETLCounts:
     fix: int = 0
     var: int = 0
     seuil: int = 0
+
+
+@dataclass(frozen=True)
+class ETLProfile:
+    name: str
+    mode: str
+    batch_size: int = 1000
+
+
+ETL_PROFILES: dict[str, ETLProfile] = {
+    "copy": ETLProfile(name="copy", mode="copy"),
+    "batch": ETLProfile(name="batch", mode="batch", batch_size=2000),
+}
+
+TABLE_SPECS: list[tuple[str, str, list[str]]] = [
+    (
+        "tmp_des",
+        "des_file.csv",
+        [
+            "DES_ID_NUM",
+            "DES_POS_COD",
+            "DES_NUM_ID",
+            "DES_NPR_USG",
+            "DES_DAT_TAR",
+            "DES_CIV_LIB",
+            "DES_NOR_AFN",
+            "DES_LIG_AD2",
+            "DES_LIG_AD3",
+            "DES_LIG_AD4",
+            "DES_LIG_AD5",
+            "DES_LIG_AD6",
+            "DES_LIG_AD7",
+            "DES_COD_PAY",
+        ],
+    ),
+    (
+        "tmp_fix",
+        "fix_file.csv",
+        [
+            "FIX_DES_ID_NUM",
+            "FIX_ID_NUM",
+            "FIX_MDT_DTJ",
+            "FIX_TYP_NUM",
+            "FIX_DAT_TOT",
+            "FIX_DAT_TAR",
+            "FIX_TYP_RGP",
+            "FIX_CPA_NUM",
+            "FIX_UGE_SER",
+            "FIX_CPA_ORD",
+            "FIX_INF_DRG",
+            "FIX_INF_DIV",
+            "FIX_MONTANT",
+            "FIX_DGR_TYP",
+            "FIX_NOM_PTR",
+        ],
+    ),
+    ("tmp_var", "var_file.csv", ["VAR_FIX_DES_ID_NUM", "VAR_FIX_ID_NUM", "VAR_ID_NUM", "VAR_INF_DET"]),
+    ("tmp_seuil", "seuil_file.csv", ["SEU_CTI", "SEU_MDT", "SEU_CPA", "SEU_MNT"]),
+]
+
+TABLE_COLUMNS = {table: columns for table, _, columns in TABLE_SPECS}
+
+
+def log_phase_start(logger: logging.Logger, profile: ETLProfile, phase_name: str) -> None:
+    logger.info("ETL phase start", extra={"profile": profile.name, "phase": phase_name})
+
+
+def log_phase_end(logger: logging.Logger, profile: ETLProfile, phase_name: str, elapsed_sec: float) -> None:
+    logger.info(
+        "ETL phase end",
+        extra={"profile": profile.name, "phase": phase_name, "elapsed_sec": round(elapsed_sec, 6)},
+    )
+
+
+def record_phase(phase_times: dict[str, float], logger: logging.Logger, profile: ETLProfile, phase_name: str, action):
+    log_phase_start(logger, profile, phase_name)
+    phase_start = time.perf_counter()
+    result = action()
+    elapsed_sec = time.perf_counter() - phase_start
+    phase_times[phase_name] = round(elapsed_sec, 6)
+    log_phase_end(logger, profile, phase_name, elapsed_sec)
+    return result
+
+
+def write_phase_summary(path: str | None, payload: dict[str, Any]) -> None:
+    if not path:
+        return
+    Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def dmy_to_iso(value: str) -> str:
@@ -40,20 +131,12 @@ def ins_id_from_matricule(champ: str) -> str:
     return champ[-1]
 
 
-def parse_source_file(source_file: Path, target_dir: Path) -> tuple[list[str], ETLCounts]:
-    target_dir.mkdir(parents=True, exist_ok=True)
-    des_path = target_dir / "des_file.csv"
-    fix_path = target_dir / "fix_file.csv"
-    var_path = target_dir / "var_file.csv"
-    seuil_path = target_dir / "seuil_file.csv"
+def parse_source_file(source_file: Path) -> tuple[dict[str, list[list[str]]], ETLCounts]:
+    rows_by_table: dict[str, list[list[str]]] = {table: [] for table, _, _ in TABLE_SPECS}
 
     sequences: dict[str, int] = {}
     current_ids = {"des": 0, "fix": 0}
     counts = ETLCounts()
-    rows_des: list[list[str]] = []
-    rows_fix: list[list[str]] = []
-    rows_var: list[list[str]] = []
-    rows_seuil: list[list[str]] = []
 
     with source_file.open("r", encoding="utf-8") as file:
         already = True
@@ -71,7 +154,7 @@ def parse_source_file(source_file: Path, target_dir: Path) -> tuple[list[str], E
                         seu_mnt = elements[6][index * 10 + 3 : index * 10 + 10]
                         if not int(seu_cpa) and not int(seu_mnt):
                             continue
-                        rows_seuil.append([seu_cti, seu_mdt, seu_cpa, seu_mnt])
+                        rows_by_table["tmp_seuil"].append([seu_cti, seu_mdt, seu_cpa, seu_mnt])
 
             elif record_type == "DES":
                 matricule = elements[3]
@@ -86,7 +169,7 @@ def parse_source_file(source_file: Path, target_dir: Path) -> tuple[list[str], E
 
                 des_num_id = elements[3]
                 des_npr_usg = elements[4]
-                rows_des.append(
+                rows_by_table["tmp_des"].append(
                     [
                         str(new_id_des),
                         elements[2],
@@ -115,7 +198,7 @@ def parse_source_file(source_file: Path, target_dir: Path) -> tuple[list[str], E
                     sequences["F"] = 1
 
                 fix_cpa_num = elements[8]
-                rows_fix.append(
+                rows_by_table["tmp_fix"].append(
                     [
                         str(current_ids["des"]),
                         str(new_id_fix),
@@ -138,7 +221,7 @@ def parse_source_file(source_file: Path, target_dir: Path) -> tuple[list[str], E
 
             elif record_type == "VAR":
                 if current_ids["fix"]:
-                    rows_var.append(
+                    rows_by_table["tmp_var"].append(
                         [
                             str(current_ids["des"]),
                             str(current_ids["fix"]),
@@ -147,53 +230,24 @@ def parse_source_file(source_file: Path, target_dir: Path) -> tuple[list[str], E
                         ]
                     )
 
-    for path, rows, header in [
-        (des_path, rows_des, [
-            "DES_ID_NUM",
-            "DES_POS_COD",
-            "DES_NUM_ID",
-            "DES_NPR_USG",
-            "DES_DAT_TAR",
-            "DES_CIV_LIB",
-            "DES_NOR_AFN",
-            "DES_LIG_AD2",
-            "DES_LIG_AD3",
-            "DES_LIG_AD4",
-            "DES_LIG_AD5",
-            "DES_LIG_AD6",
-            "DES_LIG_AD7",
-            "DES_COD_PAY",
-        ]),
-        (fix_path, rows_fix, [
-            "FIX_DES_ID_NUM",
-            "FIX_ID_NUM",
-            "FIX_MDT_DTJ",
-            "FIX_TYP_NUM",
-            "FIX_DAT_TOT",
-            "FIX_DAT_TAR",
-            "FIX_TYP_RGP",
-            "FIX_CPA_NUM",
-            "FIX_UGE_SER",
-            "FIX_CPA_ORD",
-            "FIX_INF_DRG",
-            "FIX_INF_DIV",
-            "FIX_MONTANT",
-            "FIX_DGR_TYP",
-            "FIX_NOM_PTR",
-        ]),
-        (var_path, rows_var, ["VAR_FIX_DES_ID_NUM", "VAR_FIX_ID_NUM", "VAR_ID_NUM", "VAR_INF_DET"]),
-        (seuil_path, rows_seuil, ["SEU_CTI", "SEU_MDT", "SEU_CPA", "SEU_MNT"]),
-    ]:
+    counts.des = len(rows_by_table["tmp_des"])
+    counts.fix = len(rows_by_table["tmp_fix"])
+    counts.var = len(rows_by_table["tmp_var"])
+    counts.seuil = len(rows_by_table["tmp_seuil"])
+    return rows_by_table, counts
+
+
+def write_csv_bundle(target_dir: Path, rows_by_table: dict[str, list[list[str]]]) -> list[Path]:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+    for table, filename, header in TABLE_SPECS:
+        path = target_dir / filename
         with path.open("w", newline="", encoding="utf-8") as file:
             writer = csv.writer(file, delimiter="|")
             writer.writerow(header)
-            writer.writerows(rows)
-
-    counts.des = len(rows_des)
-    counts.fix = len(rows_fix)
-    counts.var = len(rows_var)
-    counts.seuil = len(rows_seuil)
-    return [str(des_path), str(fix_path), str(var_path), str(seuil_path)], counts
+            writer.writerows(rows_by_table[table])
+        paths.append(path)
+    return paths
 
 
 def copy_csv_to_table(conn, table: str, csv_file: Path) -> int:
@@ -211,9 +265,91 @@ def copy_csv_to_table(conn, table: str, csv_file: Path) -> int:
     return after_count - before_count
 
 
-def main() -> None:
+def insert_rows_in_batches(conn, table: str, rows: list[list[str]], columns: list[str], batch_size: int) -> int:
+    if not rows:
+        return 0
+
+    placeholders = ", ".join(["%s"] * len(columns))
+    insert_sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})"
+    inserted = 0
+    with conn.cursor() as cur:
+        for start in range(0, len(rows), batch_size):
+            batch = rows[start : start + batch_size]
+            cur.executemany(insert_sql, batch)
+            inserted += len(batch)
+    return inserted
+
+
+def execute_sql(conn: Any, statement: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(statement)
+
+
+def run_profile(profile: ETLProfile, source_file: Path, db: DatabaseConnexion, tmp_dir: Path, logger: logging.Logger) -> dict[str, Any]:
+    phase_times: dict[str, float] = {}
+
+    rows_by_table, counts = record_phase(
+        phase_times,
+        logger,
+        profile,
+        "parse_source_file",
+        lambda: parse_source_file(source_file),
+    )
+    logger.info("ETL preparation finished", extra={"profile": profile.name, "counts": counts.__dict__})
+
+    with db as conn:
+        pg_conn = cast(Any, conn)
+
+        record_phase(
+            phase_times,
+            logger,
+            profile,
+            "truncate_target_tables",
+            lambda: execute_sql(pg_conn, "TRUNCATE TABLE tmp_des, tmp_fix, tmp_var, tmp_seuil"),
+        )
+
+        inserted: dict[str, int] = {}
+        if profile.mode == "copy":
+            csv_paths = record_phase(
+                phase_times,
+                logger,
+                profile,
+                "write_csv_bundle",
+                lambda: write_csv_bundle(tmp_dir, rows_by_table),
+            )
+            for table, csv_path in zip((spec[0] for spec in TABLE_SPECS), csv_paths, strict=True):
+                inserted[table] = record_phase(
+                    phase_times,
+                    logger,
+                    profile,
+                    f"copy_{table}",
+                    lambda table=table, csv_path=csv_path: copy_csv_to_table(pg_conn, table, csv_path),
+                )
+        elif profile.mode == "batch":
+            for table, _, _ in TABLE_SPECS:
+                inserted[table] = record_phase(
+                    phase_times,
+                    logger,
+                    profile,
+                    f"batch_insert_{table}",
+                    lambda table=table: insert_rows_in_batches(pg_conn, table, rows_by_table[table], TABLE_COLUMNS[table], profile.batch_size),
+                )
+        else:
+            raise ValueError(f"Unsupported ETL profile: {profile.name}")
+
+    logger.info("ETL insertion finished", extra={"profile": profile.name, "inserted": inserted, "phase_times_sec": phase_times})
+    return {"inserted": inserted, "phase_times_sec": phase_times, "counts": counts.__dict__}
+
+
+def main(argv: list[str] | None = None, *, default_profile: str = "copy") -> None:
     setup_logging()
     logger = logging.getLogger(__name__)
+
+    parser = argparse.ArgumentParser(description="Run an ETL benchmark profile")
+    parser.add_argument("--profile", choices=sorted(ETL_PROFILES), default=default_profile, help="ETL profile to run")
+    args = parser.parse_args(argv)
+
+    profile = ETL_PROFILES[args.profile]
 
     source_file = Path(os.getenv("BENCH_DATA_FILE", PROJECT_ROOT / "data" / "flux_des_fix_var.dat"))
     if not source_file.exists():
@@ -225,34 +361,30 @@ def main() -> None:
     user = os.environ["PG_USER"]
     password = os.environ["PG_PASSWORD"]
     app_name = os.getenv("PG_APP_ETL", "bench-etl")
+    phase_summary_path = os.getenv("BENCH_PHASE_TIMES_PATH")
 
     db = DatabaseConnexion(host, port, dbname, user, password, app_name=app_name)
 
     with tempfile.TemporaryDirectory(prefix="bench_etl_") as tmp_dir:
         tmp_path = Path(tmp_dir)
-        csv_paths, counts = parse_source_file(source_file, tmp_path)
-        logger.info("ETL preparation finished", extra={"counts": counts.__dict__})
-
-        with db as conn:
-            with conn.cursor() as cur:
-                cur.execute("TRUNCATE TABLE tmp_des, tmp_fix, tmp_var, tmp_seuil")
-
-            inserted_des = copy_csv_to_table(conn, "tmp_des", Path(csv_paths[0]))
-            inserted_fix = copy_csv_to_table(conn, "tmp_fix", Path(csv_paths[1]))
-            inserted_var = copy_csv_to_table(conn, "tmp_var", Path(csv_paths[2]))
-            inserted_seuil = copy_csv_to_table(conn, "tmp_seuil", Path(csv_paths[3]))
-
-        logger.info(
-            "ETL insertion finished",
-            extra={
-                "inserted": {
-                    "tmp_des": inserted_des,
-                    "tmp_fix": inserted_fix,
-                    "tmp_var": inserted_var,
-                    "tmp_seuil": inserted_seuil,
-                }
+        run_summary = run_profile(profile, source_file, db, tmp_path, logger)
+        write_phase_summary(
+            phase_summary_path,
+            {
+                "kind": "etl",
+                "profile": profile.name,
+                **run_summary,
             },
         )
+        logger.info("ETL profile completed", extra={"profile": profile.name, **run_summary})
+
+
+def main_copy() -> None:
+    main(default_profile="copy")
+
+
+def main_batch() -> None:
+    main(default_profile="batch")
 
 
 if __name__ == "__main__":

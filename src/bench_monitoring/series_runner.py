@@ -37,10 +37,22 @@ def parse_nb_des_values(raw_values: list[int]) -> list[int]:
     return values
 
 
+def parse_profile_values(raw_values: list[str], available: dict[str, Any], option_name: str) -> list[str]:
+    if not raw_values:
+        raise ValueError(f"At least one {option_name} value is required")
+    values = list(dict.fromkeys(raw_values))
+    unknown = [value for value in values if value not in available]
+    if unknown:
+        raise ValueError(f"Unknown {option_name} values: {', '.join(sorted(unknown))}")
+    return values
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run benchmark series for multiple dataset volumes")
     parser.add_argument("--nb-des", nargs="+", type=int, required=True, help="Dataset volumes to generate, e.g. --nb-des 30 50 100")
     parser.add_argument("--replications", type=int, default=1, help="Number of repetitions to run for each dataset volume")
+    parser.add_argument("--etl-profiles", nargs="+", default=["copy"], help="ETL profiles to replay, e.g. copy batch")
+    parser.add_argument("--elt-profiles", nargs="+", default=["baseline"], help="ELT profiles to replay, e.g. baseline memory analyze constraints max")
     parser.add_argument("--seed", type=int, default=123, help="Random seed used for each generated dataset")
     parser.add_argument("--min-fix-per-des", type=int, default=1, help="Minimum FIX records per DES")
     parser.add_argument("--max-fix-per-des", type=int, default=50, help="Maximum FIX records per DES")
@@ -104,6 +116,14 @@ def replication_seed(base_seed: int, replication_index: int) -> int:
     return base_seed + replication_index
 
 
+def benchmark_command(family: str, profile: str) -> str:
+    if family == "etl":
+        return f"bench-monitor-etl --profile {shlex.quote(profile)}"
+    if family == "elt":
+        return f"bench-monitor-elt --profile {shlex.quote(profile)}"
+    raise ValueError(f"Unknown family: {family}")
+
+
 def run_monitored_benchmark(command_name: str, app_name: str, out_dir: Path, dataset_path: Path) -> None:
     env = os.environ.copy()
     env["BENCH_DATA_FILE"] = str(dataset_path)
@@ -127,6 +147,12 @@ def main() -> None:
     if args.replications < 1:
         raise ValueError("--replications must be >= 1")
 
+    from .elt import ELT_PROFILES
+    from .etl import ETL_PROFILES
+
+    etl_profiles = parse_profile_values(args.etl_profiles, ETL_PROFILES, "--etl-profiles")
+    elt_profiles = parse_profile_values(args.elt_profiles, ELT_PROFILES, "--elt-profiles")
+
     data_root = (project_root / args.data_root).resolve()
     results_root = (project_root / args.results_root).resolve()
     ensure_dir(data_root)
@@ -136,6 +162,8 @@ def main() -> None:
         "series_name": args.series_name,
         "seed": args.seed,
         "replications": args.replications,
+        "etl_profiles": etl_profiles,
+        "elt_profiles": elt_profiles,
         "volumes": [],
     }
 
@@ -145,8 +173,6 @@ def main() -> None:
             seed = replication_seed(args.seed, replication_index - 1)
             dataset_path = data_root / f"flux_des_fix_var_des{nb_des}_rep{replication_index}_seed{seed}.dat"
             volume_root = results_root / f"des_{nb_des}" / f"rep_{replication_index:02d}"
-            etl_out = volume_root / "etl"
-            elt_out = volume_root / "elt"
             ensure_dir(volume_root)
 
             print(f"[INFO] Preparing dataset for nb_des={nb_des}, replication={replication_index}")
@@ -161,19 +187,25 @@ def main() -> None:
                     seed=seed,
                 )
 
-                print(f"[INFO] Running ETL for nb_des={nb_des}, replication={replication_index}")
-                run_monitored_benchmark("bench-monitor-etl", "bench-etl", etl_out, dataset_path)
+                run_outputs: list[dict[str, Any]] = []
+                for profile in etl_profiles:
+                    out_dir = volume_root / f"etl_{profile}"
+                    print(f"[INFO] Running ETL profile={profile} for nb_des={nb_des}, replication={replication_index}")
+                    run_monitored_benchmark(benchmark_command("etl", profile), "bench-etl", out_dir, dataset_path)
+                    run_outputs.append({"family": "etl", "profile": profile, "out": str(out_dir)})
 
-                print(f"[INFO] Running ELT for nb_des={nb_des}, replication={replication_index}")
-                run_monitored_benchmark("bench-monitor-elt", "bench-elt", elt_out, dataset_path)
+                for profile in elt_profiles:
+                    out_dir = volume_root / f"elt_{profile}"
+                    print(f"[INFO] Running ELT profile={profile} for nb_des={nb_des}, replication={replication_index}")
+                    run_monitored_benchmark(benchmark_command("elt", profile), "bench-elt", out_dir, dataset_path)
+                    run_outputs.append({"family": "elt", "profile": profile, "out": str(out_dir)})
 
                 volume_entry["runs"].append(
                     {
                         "replication": replication_index,
                         "seed": seed,
                         "dataset": dataset_metadata(dataset_path),
-                        "etl_out": str(etl_out),
-                        "elt_out": str(elt_out),
+                        "benchmarks": run_outputs,
                     }
                 )
             except Exception as exc:
@@ -183,8 +215,7 @@ def main() -> None:
                         "replication": replication_index,
                         "seed": seed,
                         "dataset": dataset_metadata(dataset_path),
-                        "etl_out": str(etl_out),
-                        "elt_out": str(elt_out),
+                        "benchmarks": [],
                         "error": str(exc),
                     }
                 )

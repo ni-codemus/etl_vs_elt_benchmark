@@ -58,6 +58,22 @@ bench-monitor-run --cmd "bench-monitor-etl" --app bench-etl --out ./results/etl
 bench-monitor-run --cmd "bench-monitor-elt" --app bench-elt --out ./results/elt
 ```
 
+Profils disponibles:
+
+```bash
+bench-monitor-etl --profile copy
+bench-monitor-etl --profile batch
+bench-monitor-elt --profile baseline
+bench-monitor-elt --profile memory
+bench-monitor-elt --profile analyze
+bench-monitor-elt --profile constraints
+bench-monitor-elt --profile max
+```
+
+Le profil `max` combine les optimisations cohérentes testées côté ELT: mémoire temporaire, `ANALYZE`, copie `FREEZE`, et désactivation temporaire des triggers de contraintes sur les tables cibles.
+
+L'infrastructure AWS actuelle cible PostgreSQL 16.14 sur RDS, avec un parameter group dédié qui active `track_io_timing` et `track_wal_io_timing` pour rendre exploitables les métriques I/O par exécution.
+
 Lancer une série complète sur plusieurs volumes de données:
 
 ```bash
@@ -73,6 +89,16 @@ bench-monitor-series --nb-des 30 100 300 --replications 3 --results-root ./resul
 ```
 
 Chaque réplication utilise une graine différente mais reproductible, et les résultats sont rangés par volume puis par réplication.
+
+Pour comparer plusieurs variantes sur les mêmes données:
+
+```bash
+bench-monitor-series --nb-des 30 100 300 500 1000 1500 2000 --replications 5 --etl-profiles copy batch --elt-profiles baseline memory analyze constraints max --results-root ./results/series --data-root ./data/generated
+```
+
+Le monitoring capture aussi les compteurs PostgreSQL utiles à l'analyse, dont `pg_stat_wal` pour estimer le volume de WAL généré pendant chaque run.
+
+Pour chaque exécution, le monitor enregistre un snapshot de début et de fin afin de calculer les deltas de `pg_stat_io`, `pg_stat_bgwriter`, `pg_stat_database` (dont les fichiers/bytes temporaires) et `pg_stat_wal` sur le run courant.
 
 ## Variables d'environnement
 

@@ -1,51 +1,133 @@
 from __future__ import annotations
 
+import argparse
+import json
+import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
+import time
 
 from .config import PROJECT_ROOT
 from .database import DatabaseConnexion
 from .logging_setup import setup_logging
 
 
-def main() -> None:
-    setup_logging()
+TARGET_TABLES = ["bench_user.tmp_des", "bench_user.tmp_fix", "bench_user.tmp_var"]
 
-    source_file = Path(os.getenv("BENCH_DATA_FILE", PROJECT_ROOT / "data" / "flux_des_fix_var.dat"))
-    if not source_file.exists():
-        raise FileNotFoundError(f"Fichier introuvable: {source_file}")
 
-    host = os.environ["PG_HOST"]
-    port = os.environ["PG_PORT"]
-    dbname = os.environ["PG_DBNAME"]
-    user = os.environ["PG_USER"]
-    password = os.environ["PG_PASSWORD"]
-    app_name = os.getenv("PG_APP_ELT", "bench-elt")
+@dataclass(frozen=True)
+class ELTProfile:
+    name: str
+    work_mem_mb: int | None = None
+    temp_buffers_mb: int | None = None
+    maintenance_work_mem_mb: int | None = None
+    synchronous_commit_off: bool = False
+    analyze_after_copy: bool = False
+    analyze_temp_tables: bool = False
+    disable_constraints: bool = False
+    copy_freeze: bool = False
+    jit_off: bool = False
 
-    db = DatabaseConnexion(host, port, dbname, user, password, app_name=app_name)
 
-    sql_script = """
-    --CREATE TEMP TABLE staging_raw(
-    --    line_number BIGINT GENERATED ALWAYS AS IDENTITY,
-    --    type TEXT,
-    --    col1 TEXT,
-    --    col2 TEXT,
-    --    col3 TEXT,
-    --    col4 TEXT,
-    --    col5 TEXT,
-    --    col6 TEXT,
-    --    col7 TEXT,
-    --    col8 TEXT,
-    --    col9 TEXT,
-    --    col10 TEXT,
-    --    col11 TEXT,
-    --    col12 TEXT,
-    --    col13 TEXT,
-    --    col14 TEXT,
-    --    col15 TEXT,
-    --    colnull TEXT
-    --) ON COMMIT DROP;
-    
+ELT_PROFILES: dict[str, ELTProfile] = {
+    "baseline": ELTProfile(name="baseline"),
+    "memory": ELTProfile(name="memory", work_mem_mb=64, temp_buffers_mb=64, maintenance_work_mem_mb=256),
+    "analyze": ELTProfile(name="analyze", analyze_after_copy=True, analyze_temp_tables=True),
+    "constraints": ELTProfile(name="constraints", disable_constraints=True),
+    "max": ELTProfile(
+        name="max",
+        work_mem_mb=128,
+        temp_buffers_mb=64,
+        maintenance_work_mem_mb=512,
+        synchronous_commit_off=True,
+        analyze_after_copy=True,
+        analyze_temp_tables=True,
+        disable_constraints=True,
+        copy_freeze=True,
+        jit_off=True,
+    ),
+}
+
+
+def log_phase_start(logger: logging.Logger, profile: ELTProfile, phase_name: str) -> None:
+    logger.info("ELT phase start", extra={"profile": profile.name, "phase": phase_name})
+
+
+def log_phase_end(logger: logging.Logger, profile: ELTProfile, phase_name: str, elapsed_sec: float) -> None:
+    logger.info(
+        "ELT phase end",
+        extra={"profile": profile.name, "phase": phase_name, "elapsed_sec": round(elapsed_sec, 6)},
+    )
+
+
+def record_phase(phase_times: dict[str, float], logger: logging.Logger, profile: ELTProfile, phase_name: str, action):
+    log_phase_start(logger, profile, phase_name)
+    phase_start = time.perf_counter()
+    result = action()
+    elapsed_sec = time.perf_counter() - phase_start
+    phase_times[phase_name] = round(elapsed_sec, 6)
+    log_phase_end(logger, profile, phase_name, elapsed_sec)
+    return result
+
+
+def write_phase_summary(path: str | None, payload: dict[str, object]) -> None:
+    if not path:
+        return
+    Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def session_prelude(profile: ELTProfile) -> list[str]:
+    statements: list[str] = []
+    if profile.work_mem_mb is not None:
+        statements.append(f"SET LOCAL work_mem = '{profile.work_mem_mb}MB';")
+    if profile.temp_buffers_mb is not None:
+        statements.append(f"SET LOCAL temp_buffers = '{profile.temp_buffers_mb}MB';")
+    if profile.maintenance_work_mem_mb is not None:
+        statements.append(f"SET LOCAL maintenance_work_mem = '{profile.maintenance_work_mem_mb}MB';")
+    if profile.synchronous_commit_off:
+        statements.append("SET LOCAL synchronous_commit = off;")
+    if profile.jit_off:
+        statements.append("SET LOCAL jit = off;")
+    return statements
+
+
+def disable_target_constraints(cur) -> None:
+    for table in TARGET_TABLES:
+        cur.execute(f"ALTER TABLE {table} DISABLE TRIGGER ALL;")
+
+
+def enable_target_constraints(cur) -> None:
+    for table in TARGET_TABLES:
+        cur.execute(f"ALTER TABLE {table} ENABLE TRIGGER ALL;")
+
+
+def apply_session_prelude(cur, profile: ELTProfile) -> None:
+    for statement in session_prelude(profile):
+        cur.execute(statement)
+
+
+def _copy_into_staging(cur, source_file: Path, expected_pipes: int, copy_freeze_clause: str) -> None:
+    with source_file.open("r", encoding="utf-8") as file:
+        copy_query = (
+            "COPY staging_raw (type, col1, col2, col3, col4, col5, col6, col7, col8, col9, col10, col11, col12, col13, col14, col15, colnull) "
+            f"FROM STDIN WITH (FORMAT CSV, DELIMITER '|', NULL ''{copy_freeze_clause})"
+        )
+        with cur.copy(copy_query) as copy:
+            for line in file:
+                clean_line = line.rstrip("\n")
+                current_pipes = clean_line.count("|")
+                if current_pipes < expected_pipes:
+                    clean_line += "|" * (expected_pipes - current_pipes)
+                copy.write(clean_line + "\n")
+
+
+def build_elti_sql(profile: ELTProfile) -> str:
+    analyze_temp = "ANALYZE temp_hierarchie_complete;" if profile.analyze_temp_tables else ""
+    analyze_des = "ANALYZE mapping_des;" if profile.analyze_temp_tables else ""
+    analyze_fix = "ANALYZE mapping_fix;" if profile.analyze_temp_tables else ""
+
+    return f"""
     CREATE TEMP TABLE temp_hierarchie_complete AS
     WITH donnees_utiles AS (
         SELECT * FROM staging_raw WHERE type IN ('DES', 'FIX', 'VAR')
@@ -64,8 +146,7 @@ def main() -> None:
     CREATE INDEX idx_temp_type ON temp_hierarchie_complete(type);
     CREATE INDEX idx_temp_hier_des ON temp_hierarchie_complete(des_block);
     CREATE INDEX idx_temp_hier_fix ON temp_hierarchie_complete(des_block, fix_block);
-
-    ANALYZE temp_hierarchie_complete;
+    {analyze_temp}
 
     CREATE TEMP TABLE mapping_des AS
     SELECT
@@ -76,7 +157,7 @@ def main() -> None:
     WHERE type = 'DES';
 
     CREATE INDEX idx_map_des_block ON mapping_des(des_block);
-    ANALYZE mapping_des;
+    {analyze_des}
 
     INSERT INTO tmp_des
     (
@@ -127,7 +208,7 @@ def main() -> None:
     ORDER BY h.line_number;
 
     CREATE INDEX idx_map_fix_blocks ON mapping_fix(des_block, fix_block);
-    ANALYZE mapping_fix;
+    {analyze_fix}
 
     INSERT INTO tmp_fix
     (
@@ -219,37 +300,107 @@ def main() -> None:
         ed.montant::NUMERIC(7) AS seu_mnt
     FROM extracted_data ed
     CROSS JOIN source_data sd
-    WHERE ed.cpa ~ '^[0-9]{3}$'
-      AND ed.montant ~ '^[0-9]{7}$'
+    WHERE ed.cpa ~ '^[0-9]{{3}}$'
+      AND ed.montant ~ '^[0-9]{{7}}$'
       AND ed.bloc10 <> '0000000000'
       AND ed.montant <> '0000000';
     """
 
+
+def main(argv: list[str] | None = None, *, default_profile: str = "baseline") -> None:
+    setup_logging()
+    logger = logging.getLogger(__name__)
+
+    parser = argparse.ArgumentParser(description="Run an ELT benchmark profile")
+    parser.add_argument("--profile", choices=sorted(ELT_PROFILES), default=default_profile, help="ELT profile to run")
+    args = parser.parse_args(argv)
+
+    profile = ELT_PROFILES[args.profile]
+    source_file = Path(os.getenv("BENCH_DATA_FILE", PROJECT_ROOT / "data" / "flux_des_fix_var.dat"))
+    if not source_file.exists():
+        raise FileNotFoundError(f"Fichier introuvable: {source_file}")
+
+    host = os.environ["PG_HOST"]
+    port = os.environ["PG_PORT"]
+    dbname = os.environ["PG_DBNAME"]
+    user = os.environ["PG_USER"]
+    password = os.environ["PG_PASSWORD"]
+    app_name = os.getenv("PG_APP_ELT", "bench-elt")
+    phase_summary_path = os.getenv("BENCH_PHASE_TIMES_PATH")
+
+    db = DatabaseConnexion(host, port, dbname, user, password, app_name=app_name)
+    sql_script = build_elti_sql(profile)
+    phase_times: dict[str, float] = {}
+
     with db as conn:
         with conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE tmp_des, tmp_fix, tmp_var, tmp_seuil")
-            cur.execute(
-                "CREATE TEMP TABLE staging_raw("
-                "line_number BIGINT GENERATED ALWAYS AS IDENTITY,"
-                "type TEXT, col1 TEXT, col2 TEXT, col3 TEXT, col4 TEXT, col5 TEXT, col6 TEXT, col7 TEXT, col8 TEXT, col9 TEXT, col10 TEXT, col11 TEXT, col12 TEXT, col13 TEXT, col14 TEXT, col15 TEXT, colnull TEXT"
-                ") ON COMMIT DROP;"
-            )
+            if profile.disable_constraints:
+                record_phase(phase_times, logger, profile, "disable_constraints", lambda: disable_target_constraints(cur))
+
+            record_phase(phase_times, logger, profile, "truncate_target_tables", lambda: cur.execute("TRUNCATE TABLE tmp_des, tmp_fix, tmp_var, tmp_seuil"))  # type: ignore[arg-type]
+            record_phase(
+                phase_times,
+                logger,
+                profile,
+                "create_staging_raw",
+                lambda: cur.execute(
+                    "CREATE TEMP TABLE staging_raw("
+                    "line_number BIGINT GENERATED ALWAYS AS IDENTITY,"
+                    "type TEXT, col1 TEXT, col2 TEXT, col3 TEXT, col4 TEXT, col5 TEXT, col6 TEXT, col7 TEXT, col8 TEXT, col9 TEXT, col10 TEXT, col11 TEXT, col12 TEXT, col13 TEXT, col14 TEXT, col15 TEXT, colnull TEXT"
+                    ") ON COMMIT DROP;"
+                ),
+            )  # type: ignore[arg-type]
 
             expected_pipes = 16
-            with source_file.open("r", encoding="utf-8") as file:
-                copy_query = (
-                    "COPY staging_raw (type, col1, col2, col3, col4, col5, col6, col7, col8, col9, col10, col11, col12, col13, col14, col15, colnull) "
-                    "FROM STDIN WITH (FORMAT CSV, DELIMITER '|', NULL '')"
-                )
-                with cur.copy(copy_query) as copy:
-                    for line in file:
-                        clean_line = line.rstrip("\n")
-                        current_pipes = clean_line.count("|")
-                        if current_pipes < expected_pipes:
-                            clean_line += "|" * (expected_pipes - current_pipes)
-                        copy.write(clean_line + "\n")
+            copy_freeze_clause = ", FREEZE" if profile.copy_freeze else ""
+            record_phase(
+                phase_times,
+                logger,
+                profile,
+                "copy_into_staging_raw",
+                lambda: _copy_into_staging(cur, source_file, expected_pipes, copy_freeze_clause),
+            )  # type: ignore[arg-type]
 
-            cur.execute(sql_script)
+            if profile.analyze_after_copy:
+                record_phase(phase_times, logger, profile, "analyze_staging_raw", lambda: cur.execute("ANALYZE staging_raw"))  # type: ignore[arg-type]
+
+            if profile.work_mem_mb is not None or profile.temp_buffers_mb is not None or profile.maintenance_work_mem_mb is not None or profile.synchronous_commit_off or profile.jit_off:
+                record_phase(phase_times, logger, profile, "session_prelude", lambda: apply_session_prelude(cur, profile))
+
+            record_phase(phase_times, logger, profile, "transform_and_load", lambda: cur.execute(sql_script))  # type: ignore[arg-type]
+
+            if profile.disable_constraints:
+                record_phase(phase_times, logger, profile, "enable_constraints", lambda: enable_target_constraints(cur))
+
+    write_phase_summary(
+        phase_summary_path,
+        {
+            "kind": "elt",
+            "profile": profile.name,
+            "phase_times_sec": phase_times,
+        },
+    )
+    logger.info("ELT profile completed", extra={"profile": profile.name, "phase_times_sec": phase_times})
+
+
+def main_baseline() -> None:
+    main(default_profile="baseline")
+
+
+def main_memory() -> None:
+    main(default_profile="memory")
+
+
+def main_analyze() -> None:
+    main(default_profile="analyze")
+
+
+def main_constraints() -> None:
+    main(default_profile="constraints")
+
+
+def main_max() -> None:
+    main(default_profile="max")
 
 
 if __name__ == "__main__":

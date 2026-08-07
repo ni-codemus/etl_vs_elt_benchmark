@@ -36,6 +36,27 @@ resource "aws_db_subnet_group" "this" {
   })
 }
 
+resource "aws_db_parameter_group" "this" {
+  name   = "${local.name_prefix}-postgres16-params"
+  family = "postgres16"
+
+  parameter {
+    name         = "track_io_timing"
+    value        = "1"
+    apply_method = "immediate"
+  }
+
+  parameter {
+    name         = "track_wal_io_timing"
+    value        = "1"
+    apply_method = "immediate"
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-postgres16-params"
+  })
+}
+
 resource "aws_db_instance" "this" {
   identifier = "${local.name_prefix}-postgres"
 
@@ -50,6 +71,7 @@ resource "aws_db_instance" "this" {
   multi_az               = false
   db_subnet_group_name   = aws_db_subnet_group.this.name
   vpc_security_group_ids = [aws_security_group.rds.id]
+  parameter_group_name   = aws_db_parameter_group.this.name
 
   db_name  = var.pg_dbname
   username = var.pg_super_user

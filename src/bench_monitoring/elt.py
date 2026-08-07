@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import time
 
+import psycopg
+
 from .config import PROJECT_ROOT
 from .database import DatabaseConnexion
 from .logging_setup import setup_logging
@@ -113,6 +115,21 @@ def build_admin_db(host: str, port: str, dbname: str, app_name: str) -> Database
     if not super_user or not super_pass:
         raise RuntimeError("PG_SUPER_USER et PG_SUPER_PASS sont requis pour le profil ELT 'constraints' ou 'max'.")
     return DatabaseConnexion(host, port, dbname, super_user, super_pass, app_name=f"{app_name}-admin")
+
+
+def can_disable_target_constraints(cur, logger: logging.Logger) -> bool:
+    probe_table = TARGET_TABLES[0]
+    savepoint_name = "constraint_probe"
+    try:
+        cur.execute(f"SAVEPOINT {savepoint_name}")
+        cur.execute(f"ALTER TABLE {probe_table} DISABLE TRIGGER ALL;")
+        cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+        logger.info("ELT constraints optimization available", extra={"probe_table": probe_table})
+        return True
+    except psycopg.errors.InsufficientPrivilege as exc:
+        cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+        logger.info("ELT constraints optimization unavailable", extra={"probe_table": probe_table, "reason": str(exc)})
+        return False
 
 
 def _copy_into_staging(cur, source_file: Path, expected_pipes: int, copy_freeze_clause: str) -> None:
@@ -340,11 +357,16 @@ def main(argv: list[str] | None = None, *, default_profile: str = "baseline") ->
     admin_db = build_admin_db(host, port, dbname, app_name) if profile.disable_constraints else None
     sql_script = build_elti_sql(profile)
     phase_times: dict[str, float] = {}
+    constraints_optimization_enabled = False
 
     if admin_db is not None:
         with db as conn, admin_db as admin_conn:
             with conn.cursor() as cur, admin_conn.cursor() as admin_cur:
-                record_phase(phase_times, logger, profile, "disable_constraints", lambda: disable_target_constraints(admin_cur))
+                constraints_optimization_enabled = can_disable_target_constraints(admin_cur, logger)
+                if profile.disable_constraints and not constraints_optimization_enabled:
+                    logger.info("ELT profile %s will continue without constraint optimization", profile.name)
+                if profile.disable_constraints and constraints_optimization_enabled:
+                    record_phase(phase_times, logger, profile, "disable_constraints", lambda: disable_target_constraints(admin_cur))
                 record_phase(phase_times, logger, profile, "truncate_target_tables", lambda: cur.execute("TRUNCATE TABLE tmp_des, tmp_fix, tmp_var, tmp_seuil"))  # type: ignore[arg-type]
                 if profile.work_mem_mb is not None or profile.temp_buffers_mb is not None or profile.maintenance_work_mem_mb is not None or profile.synchronous_commit_off or profile.jit_off:
                     record_phase(phase_times, logger, profile, "session_prelude", lambda: apply_session_prelude(cur, profile))
@@ -376,7 +398,8 @@ def main(argv: list[str] | None = None, *, default_profile: str = "baseline") ->
 
                 record_phase(phase_times, logger, profile, "transform_and_load", lambda: cur.execute(sql_script))  # type: ignore[arg-type]
 
-                record_phase(phase_times, logger, profile, "enable_constraints", lambda: enable_target_constraints(admin_cur))
+                if profile.disable_constraints and constraints_optimization_enabled:
+                    record_phase(phase_times, logger, profile, "enable_constraints", lambda: enable_target_constraints(admin_cur))
     else:
         with db as conn:
             with conn.cursor() as cur:
@@ -416,6 +439,7 @@ def main(argv: list[str] | None = None, *, default_profile: str = "baseline") ->
         {
             "kind": "elt",
             "profile": profile.name,
+            "constraints_optimization_enabled": constraints_optimization_enabled,
             "phase_times_sec": phase_times,
         },
     )

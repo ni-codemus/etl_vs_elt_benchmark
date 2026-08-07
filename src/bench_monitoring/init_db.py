@@ -4,6 +4,11 @@ from pathlib import Path
 import psycopg
 from psycopg import sql
 
+
+def _create_database_if_missing(conn: psycopg.Connection) -> None:
+    conn.execute(sql.SQL("CREATE DATABASE {}" ).format(sql.Identifier(db_name)))
+
+
 import bench_monitoring.config  # noqa: F401 - loads configs/.env as a side effect
 from bench_monitoring.database import DatabaseConnexion
 
@@ -28,11 +33,12 @@ root_conn = psycopg.connect(
     dbname="postgres",
     user=super_user_name,
     password=super_user_pass,
+    sslmode="require",
     autocommit=True,
 )
 
 try:
-    root_conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(db_name)))
+    root_conn.execute(sql.SQL("CREATE DATABASE {}" ).format(sql.Identifier(db_name)))
 except psycopg.errors.DuplicateDatabase:
     print(f"La base de données {db_name} existe déjà.")
 finally:

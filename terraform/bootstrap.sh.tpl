@@ -9,6 +9,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 sudo dnf update -y
 sudo dnf install -y git python3.11 python3.11-pip python3.11-devel make gcc
+sudo dnf install -y amazon-ssm-agent || true
 sudo systemctl enable --now amazon-ssm-agent || true
 
 if ! id bench >/dev/null 2>&1; then

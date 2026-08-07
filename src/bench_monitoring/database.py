@@ -20,6 +20,7 @@ class DatabaseConnexion:
             "dbname": dbname,
             "user": user,
             "password": password,
+            "sslmode": "require",
         }
         if app_name:
             self.params["application_name"] = app_name

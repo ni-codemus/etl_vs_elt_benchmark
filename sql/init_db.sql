@@ -1,8 +1,11 @@
 CREATE ROLE bench_user WITH LOGIN PASSWORD 'bench_pass';
 
-CREATE SCHEMA bench_user AUTHORIZATION bench_user;
-
+CREATE SCHEMA IF NOT EXISTS bench_user;
+ALTER SCHEMA bench_user OWNER TO bench_user;
 ALTER ROLE bench_user SET search_path TO bench_user;
+GRANT ALL ON SCHEMA bench_user TO bench_user;
+GRANT ALL ON ALL TABLES IN SCHEMA bench_user TO bench_user;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA bench_user TO bench_user;
 
 CREATE TABLE IF NOT EXISTS bench_user.tmp_seuil(
     seu_cpa NUMERIC(3),

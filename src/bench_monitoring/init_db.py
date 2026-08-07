@@ -4,11 +4,6 @@ from pathlib import Path
 import psycopg
 from psycopg import sql
 
-
-def _create_database_if_missing(conn: psycopg.Connection) -> None:
-    conn.execute(sql.SQL("CREATE DATABASE {}" ).format(sql.Identifier(db_name)))
-
-
 import bench_monitoring.config  # noqa: F401 - loads configs/.env as a side effect
 from bench_monitoring.database import DatabaseConnexion
 
@@ -50,4 +45,11 @@ sql_file_path = project_root_path / "sql" / "init_db.sql"
 with db as conn:
     with conn.cursor() as cur:
         with sql_file_path.open("r", encoding="utf-8") as sql_file:
-            cur.execute(sql_file.read())
+            sql_text = sql_file.read()
+
+        try:
+            cur.execute(sql_text)
+        except psycopg.errors.DuplicateObject as exc:
+            print(f"Initialisation déjà appliquée, continuation : {exc}")
+        except psycopg.errors.DuplicateDatabase as exc:
+            print(f"Base déjà présente, continuation : {exc}")

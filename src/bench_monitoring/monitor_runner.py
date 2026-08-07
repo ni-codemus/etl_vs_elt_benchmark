@@ -391,10 +391,6 @@ def summarize(samples: List[Sample], exit_code: int, cmd: str, app_name: str, pg
         return {"min": min(vals), "max": max(vals), "avg": statistics.fmean(vals)}
 
     wait_events_seen = sorted({(s.db_wait_event_type, s.db_wait_event) for s in samples if s.db_wait_event_type is not None or s.db_wait_event is not None})
-    wal_bytes = arr("db_wal_bytes")
-    wal_records = arr("db_wal_records")
-    wal_write_time = arr("db_wal_write_time_ms")
-    wal_sync_time = arr("db_wal_sync_time_ms")
     return {
         "command": cmd,
         "application_name": app_name,

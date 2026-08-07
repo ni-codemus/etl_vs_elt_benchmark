@@ -529,7 +529,8 @@ def monitor_command(cmd: str, out_dir: str, sample_interval: float = 0.2, db_dsn
     with open(os.path.join(run_dir, "stderr.log"), "w", encoding="utf-8") as f:
         f.writelines(stderr_lines)
 
-    print(f"[OK] exit_code={exit_code}")
+    exit_prefix = "[OK]" if exit_code == 0 else "[ERROR]"
+    print(f"{exit_prefix} exit_code={exit_code}")
     print(f"[OK] {os.path.join(run_dir, 'timeseries.csv')}")
     if phase_summary:
         print(f"[OK] {phase_summary_path}")

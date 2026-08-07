@@ -107,6 +107,14 @@ def apply_session_prelude(cur, profile: ELTProfile) -> None:
         cur.execute(statement)
 
 
+def build_admin_db(host: str, port: str, dbname: str, app_name: str) -> DatabaseConnexion:
+    super_user = os.getenv("PG_SUPER_USER")
+    super_pass = os.getenv("PG_SUPER_PASS")
+    if not super_user or not super_pass:
+        raise RuntimeError("PG_SUPER_USER et PG_SUPER_PASS sont requis pour le profil ELT 'constraints' ou 'max'.")
+    return DatabaseConnexion(host, port, dbname, super_user, super_pass, app_name=f"{app_name}-admin")
+
+
 def _copy_into_staging(cur, source_file: Path, expected_pipes: int, copy_freeze_clause: str) -> None:
     with source_file.open("r", encoding="utf-8") as file:
         copy_query = (
@@ -329,48 +337,79 @@ def main(argv: list[str] | None = None, *, default_profile: str = "baseline") ->
     phase_summary_path = os.getenv("BENCH_PHASE_TIMES_PATH")
 
     db = DatabaseConnexion(host, port, dbname, user, password, app_name=app_name)
+    admin_db = build_admin_db(host, port, dbname, app_name) if profile.disable_constraints else None
     sql_script = build_elti_sql(profile)
     phase_times: dict[str, float] = {}
 
-    with db as conn:
-        with conn.cursor() as cur:
-            if profile.disable_constraints:
-                record_phase(phase_times, logger, profile, "disable_constraints", lambda: disable_target_constraints(cur))
+    if admin_db is not None:
+        with db as conn, admin_db as admin_conn:
+            with conn.cursor() as cur, admin_conn.cursor() as admin_cur:
+                record_phase(phase_times, logger, profile, "disable_constraints", lambda: disable_target_constraints(admin_cur))
+                record_phase(phase_times, logger, profile, "truncate_target_tables", lambda: cur.execute("TRUNCATE TABLE tmp_des, tmp_fix, tmp_var, tmp_seuil"))  # type: ignore[arg-type]
+                if profile.work_mem_mb is not None or profile.temp_buffers_mb is not None or profile.maintenance_work_mem_mb is not None or profile.synchronous_commit_off or profile.jit_off:
+                    record_phase(phase_times, logger, profile, "session_prelude", lambda: apply_session_prelude(cur, profile))
+                record_phase(
+                    phase_times,
+                    logger,
+                    profile,
+                    "create_staging_raw",
+                    lambda: cur.execute(
+                        "CREATE TEMP TABLE staging_raw("
+                        "line_number BIGINT GENERATED ALWAYS AS IDENTITY,"
+                        "type TEXT, col1 TEXT, col2 TEXT, col3 TEXT, col4 TEXT, col5 TEXT, col6 TEXT, col7 TEXT, col8 TEXT, col9 TEXT, col10 TEXT, col11 TEXT, col12 TEXT, col13 TEXT, col14 TEXT, col15 TEXT, colnull TEXT"
+                        ") ON COMMIT DROP;"
+                    ),
+                )  # type: ignore[arg-type]
 
-            record_phase(phase_times, logger, profile, "truncate_target_tables", lambda: cur.execute("TRUNCATE TABLE tmp_des, tmp_fix, tmp_var, tmp_seuil"))  # type: ignore[arg-type]
-            record_phase(
-                phase_times,
-                logger,
-                profile,
-                "create_staging_raw",
-                lambda: cur.execute(
-                    "CREATE TEMP TABLE staging_raw("
-                    "line_number BIGINT GENERATED ALWAYS AS IDENTITY,"
-                    "type TEXT, col1 TEXT, col2 TEXT, col3 TEXT, col4 TEXT, col5 TEXT, col6 TEXT, col7 TEXT, col8 TEXT, col9 TEXT, col10 TEXT, col11 TEXT, col12 TEXT, col13 TEXT, col14 TEXT, col15 TEXT, colnull TEXT"
-                    ") ON COMMIT DROP;"
-                ),
-            )  # type: ignore[arg-type]
+                expected_pipes = 16
+                copy_freeze_clause = ", FREEZE" if profile.copy_freeze else ""
+                record_phase(
+                    phase_times,
+                    logger,
+                    profile,
+                    "copy_into_staging_raw",
+                    lambda: _copy_into_staging(cur, source_file, expected_pipes, copy_freeze_clause),
+                )  # type: ignore[arg-type]
 
-            expected_pipes = 16
-            copy_freeze_clause = ", FREEZE" if profile.copy_freeze else ""
-            record_phase(
-                phase_times,
-                logger,
-                profile,
-                "copy_into_staging_raw",
-                lambda: _copy_into_staging(cur, source_file, expected_pipes, copy_freeze_clause),
-            )  # type: ignore[arg-type]
+                if profile.analyze_after_copy:
+                    record_phase(phase_times, logger, profile, "analyze_staging_raw", lambda: cur.execute("ANALYZE staging_raw"))  # type: ignore[arg-type]
 
-            if profile.analyze_after_copy:
-                record_phase(phase_times, logger, profile, "analyze_staging_raw", lambda: cur.execute("ANALYZE staging_raw"))  # type: ignore[arg-type]
+                record_phase(phase_times, logger, profile, "transform_and_load", lambda: cur.execute(sql_script))  # type: ignore[arg-type]
 
-            if profile.work_mem_mb is not None or profile.temp_buffers_mb is not None or profile.maintenance_work_mem_mb is not None or profile.synchronous_commit_off or profile.jit_off:
-                record_phase(phase_times, logger, profile, "session_prelude", lambda: apply_session_prelude(cur, profile))
+                record_phase(phase_times, logger, profile, "enable_constraints", lambda: enable_target_constraints(admin_cur))
+    else:
+        with db as conn:
+            with conn.cursor() as cur:
+                record_phase(phase_times, logger, profile, "truncate_target_tables", lambda: cur.execute("TRUNCATE TABLE tmp_des, tmp_fix, tmp_var, tmp_seuil"))  # type: ignore[arg-type]
+                if profile.work_mem_mb is not None or profile.temp_buffers_mb is not None or profile.maintenance_work_mem_mb is not None or profile.synchronous_commit_off or profile.jit_off:
+                    record_phase(phase_times, logger, profile, "session_prelude", lambda: apply_session_prelude(cur, profile))
+                record_phase(
+                    phase_times,
+                    logger,
+                    profile,
+                    "create_staging_raw",
+                    lambda: cur.execute(
+                        "CREATE TEMP TABLE staging_raw("
+                        "line_number BIGINT GENERATED ALWAYS AS IDENTITY,"
+                        "type TEXT, col1 TEXT, col2 TEXT, col3 TEXT, col4 TEXT, col5 TEXT, col6 TEXT, col7 TEXT, col8 TEXT, col9 TEXT, col10 TEXT, col11 TEXT, col12 TEXT, col13 TEXT, col14 TEXT, col15 TEXT, colnull TEXT"
+                        ") ON COMMIT DROP;"
+                    ),
+                )  # type: ignore[arg-type]
 
-            record_phase(phase_times, logger, profile, "transform_and_load", lambda: cur.execute(sql_script))  # type: ignore[arg-type]
+                expected_pipes = 16
+                copy_freeze_clause = ", FREEZE" if profile.copy_freeze else ""
+                record_phase(
+                    phase_times,
+                    logger,
+                    profile,
+                    "copy_into_staging_raw",
+                    lambda: _copy_into_staging(cur, source_file, expected_pipes, copy_freeze_clause),
+                )  # type: ignore[arg-type]
 
-            if profile.disable_constraints:
-                record_phase(phase_times, logger, profile, "enable_constraints", lambda: enable_target_constraints(cur))
+                if profile.analyze_after_copy:
+                    record_phase(phase_times, logger, profile, "analyze_staging_raw", lambda: cur.execute("ANALYZE staging_raw"))  # type: ignore[arg-type]
+
+                record_phase(phase_times, logger, profile, "transform_and_load", lambda: cur.execute(sql_script))  # type: ignore[arg-type]
 
     write_phase_summary(
         phase_summary_path,

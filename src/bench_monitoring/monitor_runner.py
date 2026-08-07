@@ -11,6 +11,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import quote_plus
 from typing import Any, Dict, List, Optional, Tuple, cast
@@ -350,8 +351,15 @@ def write_csv(path: str, rows: List[Sample]):
 
 
 def write_json(path: str, obj: Dict[str, Any]):
+    def default(value: Any) -> Any:
+        if isinstance(value, Decimal):
+            if value == value.to_integral_value():
+                return int(value)
+            return float(value)
+        raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
+
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+        json.dump(obj, f, ensure_ascii=False, indent=2, default=default)
 
 
 def read_json_if_exists(path: str) -> Dict[str, Any]:

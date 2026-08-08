@@ -70,7 +70,7 @@ resource "aws_iam_role_policy" "s3_series_archive" {
       {
         Sid      = "ManageSeriesArchiveObjects"
         Effect   = "Allow"
-        Action   = ["s3:PutObject", "s3:DeleteObject"]
+        Action   = ["s3:PutObject", "s3:DeleteObject", "s3:GetObject", "s3:HeadObject"]
         Resource = local.s3_archive_objects_arn
       }
     ]

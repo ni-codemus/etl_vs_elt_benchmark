@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import random
+import os
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -240,34 +241,58 @@ def generate_dat_file(
     path = Path(out_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    lines: List[str] = []
+    # target in-memory batch size before flushing to disk (default ~300 MiB)
+    batch_bytes = 300 * 1024 * 1024
+    batch_buf = bytearray()
+
     batch_date = date(2026, 3, 6)
-    lines.append(line_000(batch_date, seq=1, payload=generate_payload_000(260)))
+    # write header (overwrite any existing file)
+    with path.open("wb") as fh:
+        header = (line_000(batch_date, seq=1, payload=generate_payload_000(260)) + "\n").encode("utf-8")
+        fh.write(header)
+        fh.flush()
+        os.fsync(fh.fileno())
 
     des_id_start = 192984554
     fix_id_counter = 975547212
     total_fix = 0
 
+    def flush_buf():
+        nonlocal batch_buf
+        if not batch_buf:
+            return
+        with path.open("ab") as fh:
+            fh.write(batch_buf)
+            fh.flush()
+            os.fsync(fh.fileno())
+        batch_buf = bytearray()
+
     for i in range(nb_des):
         des_id = des_id_start + i
         des = make_des(des_id)
-        lines.append(line_des(des))
+        line = line_des(des) + "\n"
+        batch_buf.extend(line.encode("utf-8"))
 
         nfix = random.randint(min_fix_per_des, max_fix_per_des)
         for _ in range(nfix):
             fix = make_fix(des_id=des_id, fix_id=fix_id_counter)
-            lines.append(line_fix(fix))
+            batch_buf.extend((line_fix(fix) + "\n").encode("utf-8"))
             total_fix += 1
 
             nvar = random.randint(min_var_per_fix, max_var_per_fix)
             for j in range(1, nvar + 1):
                 var = make_var(des_id=des_id, fix_id=fix_id_counter, var_id=j, des=des)
-                lines.append(line_var(var))
+                batch_buf.extend((line_var(var) + "\n").encode("utf-8"))
 
             fix_id_counter += 1
 
-    lines.append(line_900(nb_fix=total_fix, nb_des=nb_des))
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        # flush if buffer exceeds threshold
+        if len(batch_buf) >= batch_bytes:
+            flush_buf()
+
+    # write trailer and flush remaining buffer
+    batch_buf.extend((line_900(nb_fix=total_fix, nb_des=nb_des) + "\n").encode("utf-8"))
+    flush_buf()
     print(f"[OK] Fichier généré: {path}")
     print(f"[COUNT] DES={nb_des} FIX={total_fix}")
 
@@ -290,50 +315,52 @@ def validate_generated_file(path: str) -> Tuple[bool, List[str]]:
     p = Path(path)
     if not p.exists():
         return False, [f"File not found: {path}"]
-
-    lines = p.read_text(encoding="utf-8").splitlines()
-    if not lines:
-        return False, ["Empty file"]
-
-    if not lines[0].startswith("000|"):
-        errors.append("L1: first line must be 000")
-    if not lines[-1].startswith("900|"):
-        errors.append("Last line must be 900")
-
-    des_set = set()
-    fix_set = set()
-
-    for i, line in enumerate(lines, start=1):
-        parts = line.split("|")
-        rec = parts[0]
-
-        if rec == "DES":
-            if len(parts) < 15:
-                errors.append(f"L{i} DES: not enough fields")
+    # Validate by streaming through the file to avoid loading everything into memory
+    with p.open("r", encoding="utf-8") as fh:
+        first = None
+        last = None
+        des_set = set()
+        fix_set = set()
+        for i, line in enumerate(fh, start=1):
+            if i == 1:
+                first = line
+            last = line
+            parts = line.rstrip("\n").split("|")
+            if not parts:
                 continue
-            des_id = parts[1]
-            des_set.add(des_id)
+            rec = parts[0]
+            if rec == "DES":
+                if len(parts) < 15:
+                    errors.append(f"L{i} DES: not enough fields")
+                    continue
+                des_id = parts[1]
+                des_set.add(des_id)
+            elif rec == "FIX":
+                if len(parts) < 16:
+                    errors.append(f"L{i} FIX: not enough fields")
+                    continue
+                des_id = parts[1]
+                fix_id = parts[2]
+                if des_id not in des_set:
+                    errors.append(f"L{i} FIX references unknown DES {des_id}")
+                fix_set.add((des_id, fix_id))
+            elif rec == "VAR":
+                if len(parts) < 5:
+                    errors.append(f"L{i} VAR: not enough fields")
+                    continue
+                des_id = parts[1]
+                fix_id = parts[2]
+                if des_id not in des_set:
+                    errors.append(f"L{i} VAR references unknown DES {des_id}")
+                if (des_id, fix_id) not in fix_set:
+                    errors.append(f"L{i} VAR references unknown FIX ({des_id}, {fix_id})")
 
-        elif rec == "FIX":
-            if len(parts) < 16:
-                errors.append(f"L{i} FIX: not enough fields")
-                continue
-            des_id = parts[1]
-            fix_id = parts[2]
-            if des_id not in des_set:
-                errors.append(f"L{i} FIX references unknown DES {des_id}")
-            fix_set.add((des_id, fix_id))
-
-        elif rec == "VAR":
-            if len(parts) < 5:
-                errors.append(f"L{i} VAR: not enough fields")
-                continue
-            des_id = parts[1]
-            fix_id = parts[2]
-            if des_id not in des_set:
-                errors.append(f"L{i} VAR references unknown DES {des_id}")
-            if (des_id, fix_id) not in fix_set:
-                errors.append(f"L{i} VAR references unknown FIX ({des_id}, {fix_id})")
+        if first is None:
+            return False, ["Empty file"]
+        if not first.startswith("000|"):
+            errors.append("L1: first line must be 000")
+        if last is None or not last.startswith("900|"):
+            errors.append("Last line must be 900")
 
     return (len(errors) == 0), errors
 

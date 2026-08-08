@@ -131,8 +131,20 @@ def ins_id_from_matricule(champ: str) -> str:
     return champ[-1]
 
 
-def parse_source_file(source_file: Path) -> tuple[dict[str, list[list[str]]], ETLCounts]:
-    rows_by_table: dict[str, list[list[str]]] = {table: [] for table, _, _ in TABLE_SPECS}
+def parse_source_file(source_file: Path, tmp_dir: Path) -> tuple[dict[str, Path], ETLCounts]:
+    """
+    Parse the source dataset and write CSVs directly into tmp_dir to avoid
+    keeping all rows in memory. Returns a mapping table->csv_path and counts.
+    """
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    writers: dict[str, tuple[Path, object]] = {}
+    for table, filename, header in TABLE_SPECS:
+        path = tmp_dir / filename
+        f = path.open("w", newline="", encoding="utf-8")
+        writer = csv.writer(f, delimiter="|")
+        writer.writerow(header)
+        writers[table] = (path, (f, writer))
 
     sequences: dict[str, int] = {}
     current_ids = {"des": 0, "fix": 0}
@@ -154,7 +166,8 @@ def parse_source_file(source_file: Path) -> tuple[dict[str, list[list[str]]], ET
                         seu_mnt = elements[6][index * 10 + 3 : index * 10 + 10]
                         if not int(seu_cpa) and not int(seu_mnt):
                             continue
-                        rows_by_table["tmp_seuil"].append([seu_cti, seu_mdt, seu_cpa, seu_mnt])
+                        f, writer = writers["tmp_seuil"]
+                        writer.writerow([seu_cti, seu_mdt, seu_cpa, seu_mnt])
 
             elif record_type == "DES":
                 matricule = elements[3]
@@ -169,7 +182,8 @@ def parse_source_file(source_file: Path) -> tuple[dict[str, list[list[str]]], ET
 
                 des_num_id = elements[3]
                 des_npr_usg = elements[4]
-                rows_by_table["tmp_des"].append(
+                f, writer = writers["tmp_des"]
+                writer.writerow(
                     [
                         str(new_id_des),
                         elements[2],
@@ -198,7 +212,8 @@ def parse_source_file(source_file: Path) -> tuple[dict[str, list[list[str]]], ET
                     sequences["F"] = 1
 
                 fix_cpa_num = elements[8]
-                rows_by_table["tmp_fix"].append(
+                f, writer = writers["tmp_fix"]
+                writer.writerow(
                     [
                         str(current_ids["des"]),
                         str(new_id_fix),
@@ -221,7 +236,8 @@ def parse_source_file(source_file: Path) -> tuple[dict[str, list[list[str]]], ET
 
             elif record_type == "VAR":
                 if current_ids["fix"]:
-                    rows_by_table["tmp_var"].append(
+                    f, writer = writers["tmp_var"]
+                    writer.writerow(
                         [
                             str(current_ids["des"]),
                             str(current_ids["fix"]),
@@ -230,11 +246,17 @@ def parse_source_file(source_file: Path) -> tuple[dict[str, list[list[str]]], ET
                         ]
                     )
 
-    counts.des = len(rows_by_table["tmp_des"])
-    counts.fix = len(rows_by_table["tmp_fix"])
-    counts.var = len(rows_by_table["tmp_var"])
-    counts.seuil = len(rows_by_table["tmp_seuil"])
-    return rows_by_table, counts
+    # close writer files
+    csv_paths: dict[str, Path] = {}
+    for table, (path, (f, writer)) in writers.items():
+        f.close()
+        csv_paths[table] = path
+
+    counts.des = sum(1 for _ in csv_paths["tmp_des"].open("r", encoding="utf-8") ) - 1
+    counts.fix = sum(1 for _ in csv_paths["tmp_fix"].open("r", encoding="utf-8") ) - 1
+    counts.var = sum(1 for _ in csv_paths["tmp_var"].open("r", encoding="utf-8") ) - 1
+    counts.seuil = sum(1 for _ in csv_paths["tmp_seuil"].open("r", encoding="utf-8") ) - 1
+    return csv_paths, counts
 
 
 def write_csv_bundle(target_dir: Path, rows_by_table: dict[str, list[list[str]]]) -> list[Path]:
@@ -259,7 +281,13 @@ def copy_csv_to_table(conn, table: str, csv_file: Path) -> int:
             before_count = cur.fetchone()["count"]
             copy_sql = f"COPY {table} ({', '.join(columns)}) FROM STDIN WITH (FORMAT CSV, HEADER TRUE, DELIMITER '|')"
             with cur.copy(copy_sql) as copy:
-                copy.write(file.read())
+                # stream file into the COPY in chunks to avoid loading entire file into memory
+                file.seek(0)
+                while True:
+                    chunk = file.read(64 * 1024)
+                    if not chunk:
+                        break
+                    copy.write(chunk)
             cur.execute(f"SELECT COUNT(*) AS count FROM {table}")
             after_count = cur.fetchone()["count"]
     return after_count - before_count
@@ -288,13 +316,22 @@ def execute_sql(conn: Any, statement: str) -> None:
 def run_profile(profile: ETLProfile, source_file: Path, db: DatabaseConnexion, tmp_dir: Path, logger: logging.Logger) -> dict[str, Any]:
     phase_times: dict[str, float] = {}
 
-    rows_by_table, counts = record_phase(
+    csv_paths, counts = record_phase(
         phase_times,
         logger,
         profile,
         "parse_source_file",
-        lambda: parse_source_file(source_file),
+        lambda: parse_source_file(source_file, tmp_path),
     )
+    # If batch profile requested, load CSVs into memory for batched inserts
+    rows_by_table: dict[str, list[list[str]]] = {table: [] for table, _, _ in TABLE_SPECS}
+    if profile.mode == "batch":
+        for table, filename, _ in TABLE_SPECS:
+            path = csv_paths[table]
+            with path.open("r", encoding="utf-8") as fh:
+                reader = csv.reader(fh, delimiter="|")
+                header = next(reader, None)
+                rows_by_table[table] = [row for row in reader]
     logger.info("ETL preparation finished", extra={"profile": profile.name, "counts": counts.__dict__})
 
     with db as conn:
@@ -310,14 +347,9 @@ def run_profile(profile: ETLProfile, source_file: Path, db: DatabaseConnexion, t
 
         inserted: dict[str, int] = {}
         if profile.mode == "copy":
-            csv_paths = record_phase(
-                phase_times,
-                logger,
-                profile,
-                "write_csv_bundle",
-                lambda: write_csv_bundle(tmp_dir, rows_by_table),
-            )
-            for table, csv_path in zip((spec[0] for spec in TABLE_SPECS), csv_paths, strict=True):
+            # csv_paths is a mapping table->path produced by parse_source_file
+            for table, _, _ in TABLE_SPECS:
+                csv_path = csv_paths[table]
                 inserted[table] = record_phase(
                     phase_times,
                     logger,

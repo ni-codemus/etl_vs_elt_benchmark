@@ -30,6 +30,7 @@ class ELTProfile:
     disable_constraints: bool = False
     copy_freeze: bool = False
     jit_off: bool = False
+    batch_size: int | None = None
 
 
 ELT_PROFILES: dict[str, ELTProfile] = {
@@ -49,6 +50,9 @@ ELT_PROFILES: dict[str, ELTProfile] = {
         copy_freeze=True,
         jit_off=True,
     ),
+
+    # batch profile to allow fair comparison with ETL 'batch' profile
+    "batch": ELTProfile(name="batch", batch_size=2000),
 }
 
 
@@ -132,19 +136,67 @@ def can_disable_target_constraints(cur, logger: logging.Logger) -> bool:
         return False
 
 
-def _copy_into_staging(cur, source_file: Path, expected_pipes: int, copy_freeze_clause: str) -> None:
+def _copy_into_staging(cur, source_file: Path, expected_pipes: int, copy_freeze_clause: str, batch_size: int | None = None) -> None:
+    """
+    Stream the source file into staging_raw using buffered reads and batched writes
+    to the COPY stream. This reduces per-line write overhead and keeps memory
+    bounded. If `batch_size` is provided it controls number of lines per write
+    chunk (for parity with ETL batch profile semantics).
+    """
     with source_file.open("r", encoding="utf-8") as file:
         copy_query = (
             "COPY staging_raw (type, col1, col2, col3, col4, col5, col6, col7, col8, col9, col10, col11, col12, col13, col14, col15, colnull) "
             f"FROM STDIN WITH (FORMAT CSV, DELIMITER '|', NULL ''{copy_freeze_clause})"
         )
         with cur.copy(copy_query) as copy:
-            for line in file:
-                clean_line = line.rstrip("\n")
+            # read in chunks and assemble complete lines
+            remainder = ""
+            buf_lines: list[str] = []
+            buf_bytes = 0
+            write_threshold = 64 * 1024  # write to COPY when buffer >= 64KB
+            while True:
+                chunk = file.read(64 * 1024)
+                if not chunk:
+                    break
+                data = remainder + chunk
+                parts = data.split("\n")
+                # if last char not newline, last part is a partial line
+                if data and data[-1] != "\n":
+                    remainder = parts.pop()
+                else:
+                    remainder = ""
+
+                for line in parts:
+                    clean_line = line.rstrip("\n")
+                    current_pipes = clean_line.count("|")
+                    if current_pipes < expected_pipes:
+                        clean_line += "|" * (expected_pipes - current_pipes)
+                    entry = clean_line + "\n"
+                    buf_lines.append(entry)
+                    buf_bytes += len(entry)
+
+                    # decide when to flush buffer
+                    if batch_size is not None:
+                        if len(buf_lines) >= batch_size:
+                            copy.write("".join(buf_lines))
+                            buf_lines = []
+                            buf_bytes = 0
+                    else:
+                        if buf_bytes >= write_threshold:
+                            copy.write("".join(buf_lines))
+                            buf_lines = []
+                            buf_bytes = 0
+
+            # handle any remaining partial line
+            if remainder:
+                clean_line = remainder.rstrip("\n")
                 current_pipes = clean_line.count("|")
                 if current_pipes < expected_pipes:
                     clean_line += "|" * (expected_pipes - current_pipes)
-                copy.write(clean_line + "\n")
+                buf_lines.append(clean_line + "\n")
+
+            if buf_lines:
+                copy.write("".join(buf_lines))
 
 
 def build_elti_sql(profile: ELTProfile) -> str:
@@ -390,7 +442,7 @@ def main(argv: list[str] | None = None, *, default_profile: str = "baseline") ->
                     logger,
                     profile,
                     "copy_into_staging_raw",
-                    lambda: _copy_into_staging(cur, source_file, expected_pipes, copy_freeze_clause),
+                    lambda: _copy_into_staging(cur, source_file, expected_pipes, copy_freeze_clause, profile.batch_size),
                 )  # type: ignore[arg-type]
 
                 if profile.analyze_after_copy:

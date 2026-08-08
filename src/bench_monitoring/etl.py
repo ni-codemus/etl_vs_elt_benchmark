@@ -138,13 +138,15 @@ def parse_source_file(source_file: Path, tmp_dir: Path) -> tuple[dict[str, Path]
     """
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    writers: dict[str, tuple[Path, object]] = {}
+    writers: dict[str, tuple[object, object]] = {}
+    csv_paths: dict[str, Path] = {}
     for table, filename, header in TABLE_SPECS:
         path = tmp_dir / filename
         f = path.open("w", newline="", encoding="utf-8")
         writer = csv.writer(f, delimiter="|")
         writer.writerow(header)
-        writers[table] = (path, (f, writer))
+        writers[table] = (f, writer)
+        csv_paths[table] = path
 
     sequences: dict[str, int] = {}
     current_ids = {"des": 0, "fix": 0}
@@ -247,10 +249,8 @@ def parse_source_file(source_file: Path, tmp_dir: Path) -> tuple[dict[str, Path]
                     )
 
     # close writer files
-    csv_paths: dict[str, Path] = {}
-    for table, (path, (f, writer)) in writers.items():
+    for table, (f, writer) in writers.items():
         f.close()
-        csv_paths[table] = path
 
     counts.des = sum(1 for _ in csv_paths["tmp_des"].open("r", encoding="utf-8") ) - 1
     counts.fix = sum(1 for _ in csv_paths["tmp_fix"].open("r", encoding="utf-8") ) - 1
@@ -321,7 +321,7 @@ def run_profile(profile: ETLProfile, source_file: Path, db: DatabaseConnexion, t
         logger,
         profile,
         "parse_source_file",
-        lambda: parse_source_file(source_file, tmp_path),
+        lambda: parse_source_file(source_file, tmp_dir),
     )
     # If batch profile requested, load CSVs into memory for batched inserts
     rows_by_table: dict[str, list[list[str]]] = {table: [] for table, _, _ in TABLE_SPECS}

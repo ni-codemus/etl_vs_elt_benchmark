@@ -25,6 +25,7 @@ where = ["src"]
 bench-monitor-init-db = "bench_monitoring.init_db:__name__"
 bench-monitor-generate = "bench_monitoring.generate_data_set:main"
 bench-monitor-etl = "bench_monitoring.etl:main"
+bench-monitor-etl-baseline = "bench_monitoring.etl:main_baseline"
 bench-monitor-etl-copy = "bench_monitoring.etl:main_copy"
 bench-monitor-etl-batch = "bench_monitoring.etl:main_batch"
 bench-monitor-elt = "bench_monitoring.elt:main"

@@ -6,11 +6,12 @@ from bench_monitoring.series_runner import benchmark_command, parse_profile_valu
 
 
 def test_profile_catalogs_expose_expected_variants():
-    assert set(ETL_PROFILES) == {"copy", "batch"}
+    assert set(ETL_PROFILES) == {"baseline", "copy", "batch"}
     assert set(ELT_PROFILES) == {"baseline", "memory", "analyze", "constraints", "max"}
 
 
 def test_benchmark_command_builds_profile_specific_cli():
+    assert benchmark_command("etl", "baseline") == "bench-monitor-etl --profile baseline"
     assert benchmark_command("etl", "batch") == "bench-monitor-etl --profile batch"
     assert benchmark_command("elt", "max") == "bench-monitor-elt --profile max"
 

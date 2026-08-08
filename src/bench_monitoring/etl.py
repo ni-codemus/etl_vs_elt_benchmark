@@ -33,6 +33,7 @@ class ETLProfile:
 
 
 ETL_PROFILES: dict[str, ETLProfile] = {
+    "baseline": ETLProfile(name="baseline", mode="row"),
     "copy": ETLProfile(name="copy", mode="copy"),
     "batch": ETLProfile(name="batch", mode="batch", batch_size=2000),
 }
@@ -84,6 +85,10 @@ TABLE_SPECS: list[tuple[str, str, list[str]]] = [
 ]
 
 TABLE_COLUMNS = {table: columns for table, _, columns in TABLE_SPECS}
+TABLE_INSERT_SQL = {
+    table: f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))})"
+    for table, _, columns in TABLE_SPECS
+}
 
 
 def log_phase_start(logger: logging.Logger, profile: ETLProfile, phase_name: str) -> None:
@@ -259,6 +264,114 @@ def parse_source_file(source_file: Path, tmp_dir: Path) -> tuple[dict[str, Path]
     return csv_paths, counts
 
 
+def stream_source_file_to_tables(conn, source_file: Path) -> ETLCounts:
+    """Parse the source file and insert each target row immediately."""
+    counts = ETLCounts()
+    sequences: dict[str, int] = {}
+    current_ids = {"des": 0, "fix": 0}
+
+    with conn.cursor() as cur, source_file.open("r", encoding="utf-8") as file:
+        already = True
+        for line in file:
+            elements = line.rstrip("\n").split("|")
+            record_type = elements[0]
+
+            if record_type == "000":
+                if elements[2] == "0040" and already:
+                    already = False
+                    for index in range(13):
+                        seu_cti = elements[1]
+                        seu_mdt = dmy_to_iso(elements[4])
+                        seu_cpa = elements[6][index * 10 : index * 10 + 3]
+                        seu_mnt = elements[6][index * 10 + 3 : index * 10 + 10]
+                        if not int(seu_cpa) and not int(seu_mnt):
+                            continue
+                        cur.execute(TABLE_INSERT_SQL["tmp_seuil"], [seu_cti, seu_mdt, seu_cpa, seu_mnt])
+                        counts.seuil += 1
+
+            elif record_type == "DES":
+                matricule = elements[3]
+                ins_id = ins_id_from_matricule(matricule)
+                if ins_id not in sequences:
+                    sequences[ins_id] = 1
+
+                new_id_des = int(ins_id) * 10000000 + sequences[ins_id]
+                sequences[ins_id] += 1
+                if sequences[ins_id] > 9999999:
+                    sequences[ins_id] = 1
+
+                des_num_id = elements[3]
+                des_npr_usg = elements[4]
+                cur.execute(
+                    TABLE_INSERT_SQL["tmp_des"],
+                    [
+                        str(new_id_des),
+                        elements[2],
+                        des_num_id,
+                        des_npr_usg,
+                        dmy_to_iso(elements[5]),
+                        elements[6],
+                        elements[7],
+                        elements[8],
+                        elements[9],
+                        elements[10],
+                        elements[11],
+                        elements[12],
+                        elements[13],
+                        elements[14],
+                    ],
+                )
+                counts.des += 1
+                current_ids["des"] = new_id_des
+
+            elif record_type == "FIX":
+                if "F" not in sequences:
+                    sequences["F"] = 1
+                new_id_fix = sequences["F"]
+                sequences["F"] += 1
+                if sequences["F"] > 999999999:
+                    sequences["F"] = 1
+
+                fix_cpa_num = elements[8]
+                cur.execute(
+                    TABLE_INSERT_SQL["tmp_fix"],
+                    [
+                        str(current_ids["des"]),
+                        str(new_id_fix),
+                        dmy_to_iso(elements[3]),
+                        elements[4],
+                        dmy_to_iso(elements[5]),
+                        dmy_to_iso(elements[6]),
+                        elements[7],
+                        fix_cpa_num,
+                        elements[9],
+                        "10",
+                        elements[11],
+                        elements[12],
+                        elements[13],
+                        elements[14],
+                        elements[15],
+                    ],
+                )
+                counts.fix += 1
+                current_ids["fix"] = new_id_fix
+
+            elif record_type == "VAR":
+                if current_ids["fix"]:
+                    cur.execute(
+                        TABLE_INSERT_SQL["tmp_var"],
+                        [
+                            str(current_ids["des"]),
+                            str(current_ids["fix"]),
+                            elements[3],
+                            elements[4],
+                        ],
+                    )
+                    counts.var += 1
+
+    return counts
+
+
 def write_csv_bundle(target_dir: Path, rows_by_table: dict[str, list[list[str]]]) -> list[Path]:
     target_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
@@ -315,6 +428,29 @@ def execute_sql(conn: Any, statement: str) -> None:
 
 def run_profile(profile: ETLProfile, source_file: Path, db: DatabaseConnexion, tmp_dir: Path, logger: logging.Logger) -> dict[str, Any]:
     phase_times: dict[str, float] = {}
+
+    if profile.mode == "row":
+        with db as conn:
+            pg_conn = cast(Any, conn)
+
+            record_phase(
+                phase_times,
+                logger,
+                profile,
+                "truncate_target_tables",
+                lambda: execute_sql(pg_conn, "TRUNCATE TABLE tmp_des, tmp_fix, tmp_var, tmp_seuil"),
+            )
+            counts = record_phase(
+                phase_times,
+                logger,
+                profile,
+                "stream_source_file",
+                lambda: stream_source_file_to_tables(pg_conn, source_file),
+            )
+
+        inserted = counts.__dict__.copy()
+        logger.info("ETL insertion finished", extra={"profile": profile.name, "inserted": inserted, "phase_times_sec": phase_times})
+        return {"inserted": inserted, "phase_times_sec": phase_times, "counts": counts.__dict__}
 
     csv_paths, counts = record_phase(
         phase_times,
@@ -413,6 +549,10 @@ def main(argv: list[str] | None = None, *, default_profile: str = "copy") -> Non
 
 def main_copy() -> None:
     main(default_profile="copy")
+
+
+def main_baseline() -> None:
+    main(default_profile="baseline")
 
 
 def main_batch() -> None:

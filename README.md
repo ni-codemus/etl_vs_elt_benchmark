@@ -68,7 +68,40 @@ bench-monitor-elt --profile memory
 bench-monitor-elt --profile analyze
 bench-monitor-elt --profile constraints
 bench-monitor-elt --profile max
+bench-monitor-elt --profile batch
 ```
+
+**Modes d'optimisation**
+
+- **ETL - copy :** Chemin rapide utilisant la commande PostgreSQL `COPY` pour charger des CSV produits par l'étape de parsing ETL. Les CSV sont écrits sur disque puis streamés vers la base par blocs, ce qui limite la mémoire côté client. Adapté aux gros jeux de données si la base supporte le chargement massif.
+- **ETL - batch :** Charge les CSV en mémoire par lots puis effectue des `INSERT` via `executemany` avec une taille de lot configurable. Utilise un peu plus de mémoire côté client mais permet de comparer le coût CPU/BD des INSERTs batchés vs COPY. Contrôlé par `ETL_PROFILES['batch'].batch_size`.
+
+- **ELT - baseline :** Flux ELT simple : on stream le fichier brut dans une table de staging, puis on transforme en SQL. Réglages de session minimaux ; profil de référence à faible risque.
+- **ELT - memory :** Augmente les paramètres mémoire côté serveur (`work_mem`, `temp_buffers`, `maintenance_work_mem`) pour favoriser les opérations en mémoire pendant la transformation. À utiliser si le serveur dispose de RAM suffisante pour réduire les I/O sur fichiers temporaires.
+- **ELT - analyze :** Exécute `ANALYZE` sur les objets temporaires après le `COPY` pour fournir de meilleures statistiques au planificateur SQL avant les transformations lourdes.
+- **ELT - constraints :** Tente de désactiver temporairement les triggers/contraintes sur les tables cibles pendant le chargement pour accélérer l'insertion. L'agent vérifie les privilèges ; si l'opération n'est pas permise le profil poursuit sans cette optimisation et journalise la situation.
+- **ELT - max :** Combine plusieurs optimisations (réglages mémoire, `ANALYZE`, désactivation de contraintes, `COPY ... FREEZE`, `synchronous_commit` off, `jit` off) pour un run très performant mais gourmand en ressources.
+- **ELT - batch :** Reproduit la sémantique `batch` côté ETL : le client groupe les lignes selon `batch_size` puis écrit des blocs plus gros dans le flux `COPY`. Permet une comparaison équitable ETL vs ELT en mode batch.
+
+**Notes sur la mémoire et la sécurité**
+
+- **Mémoire client vs serveur :** Les optimisations réduisent le buffering côté client (les lectures/écritures sont streamées), mais les paramètres et opérations côté serveur (`work_mem`, `temp_buffers`, `maintenance_work_mem`, opérations internes) peuvent toujours consommer beaucoup de mémoire. Mesure le RSS client et serveur lors des ajustements.
+- **Swap :** Le streaming réduit la probabilité d'OOM, mais sur de petites instances EC2 un petit swap (ex. 1–2 GiB) reste une sécurité pragmatique pour éviter des kills immédiats en cas de pics inattendus.
+- **Mesurer avant de modifier l'infra :** Utilise `/usr/bin/time -v` pour capturer le pic RSS lors d'une génération / ETL / ELT. Exemple :
+
+```bash
+/usr/bin/time -v python3 -m bench_monitoring.generate_data_set --out data/flux.dat --nb-des 10000
+/usr/bin/time -v python3 -m bench_monitoring.etl --profile copy
+/usr/bin/time -v python3 -m bench_monitoring.elt --profile batch
+```
+
+**Fichiers et code**
+
+- ETL streaming et gestion CSV : [src/bench_monitoring/etl.py](src/bench_monitoring/etl.py)
+- ELT streaming et staging : [src/bench_monitoring/elt.py](src/bench_monitoring/elt.py)
+- Génération tamponnée (flush côté client) : [src/bench_monitoring/generate_data_set.py](src/bench_monitoring/generate_data_set.py)
+
+Si tu veux, je peux aussi ajouter des options CLI pour régler `batch_size`/`batch_mb` à l'exécution et un petit utilitaire qui lance un test profilé en mémoire et écrit un rapport dans `results/`.
 
 Le profil `max` combine les optimisations cohérentes testées côté ELT: mémoire temporaire, `ANALYZE`, copie `FREEZE`, et désactivation temporaire des triggers de contraintes sur les tables cibles.
 
@@ -103,7 +136,7 @@ Pour écrire et écraser un fichier dans S3 avec cette approche, le droit IAM mi
 Pour comparer plusieurs variantes sur les mêmes données:
 
 ```bash
-bench-monitor-series --nb-des 30 100 300 500 1000 1500 2000 --replications 5 --etl-profiles copy batch --elt-profiles baseline memory analyze constraints max --results-root ./results/series --data-root ./data/generated
+bench-monitor-series --nb-des 30 100 300 500 1000 1500 2000 --replications 5 --etl-profiles copy batch --elt-profiles baseline memory analyze constraints max batch --results-root ./results/series --data-root ./data/generated
 ```
 
 Le monitoring capture aussi les compteurs PostgreSQL utiles à l'analyse, dont `pg_stat_wal` pour estimer le volume de WAL généré pendant chaque run.

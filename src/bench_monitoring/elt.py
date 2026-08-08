@@ -478,7 +478,7 @@ def main(argv: list[str] | None = None, *, default_profile: str = "baseline") ->
                     logger,
                     profile,
                     "copy_into_staging_raw",
-                    lambda: _copy_into_staging(cur, source_file, expected_pipes, copy_freeze_clause),
+                    lambda: _copy_into_staging(cur, source_file, expected_pipes, copy_freeze_clause, profile.batch_size),
                 )  # type: ignore[arg-type]
 
                 if profile.analyze_after_copy:
@@ -516,6 +516,10 @@ def main_constraints() -> None:
 
 def main_max() -> None:
     main(default_profile="max")
+
+
+def main_batch() -> None:
+    main(default_profile="batch")
 
 
 if __name__ == "__main__":

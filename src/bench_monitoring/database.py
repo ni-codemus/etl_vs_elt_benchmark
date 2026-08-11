@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import psycopg
 from psycopg.rows import dict_row
 
@@ -20,8 +22,10 @@ class DatabaseConnexion:
             "dbname": dbname,
             "user": user,
             "password": password,
-            "sslmode": "require",
         }
+        sslmode = os.getenv("PG_SSLMODE")
+        if sslmode:
+            self.params["sslmode"] = sslmode
         if app_name:
             self.params["application_name"] = app_name
         self.conn: psycopg.Connection | None = None

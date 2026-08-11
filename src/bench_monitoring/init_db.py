@@ -13,6 +13,7 @@ super_user_name = os.environ["PG_SUPER_USER"]
 super_user_pass = os.environ["PG_SUPER_PASS"]
 port = os.environ["PG_PORT"]
 host = os.environ["PG_HOST"]
+sslmode = os.getenv("PG_SSLMODE")
 
 db = DatabaseConnexion(
     host=host,
@@ -28,8 +29,8 @@ root_conn = psycopg.connect(
     dbname="postgres",
     user=super_user_name,
     password=super_user_pass,
-    sslmode="require",
     autocommit=True,
+    **({"sslmode": sslmode} if sslmode else {}),
 )
 
 try:

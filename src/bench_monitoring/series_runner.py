@@ -8,11 +8,54 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 
 project_root = Path(__file__).resolve().parents[2]
+
+
+def read_json_if_exists(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            payload = json.load(file)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def collect_infra_metadata() -> dict[str, Any]:
+    app_root = Path(os.getenv("BENCH_APP_ROOT", "/opt/bench_monitoring"))
+    metadata_path = Path(os.getenv("BENCH_INFRA_METADATA", str(app_root / "configs" / "infrastructure.json")))
+    file_metadata = read_json_if_exists(metadata_path)
+
+    env_metadata = {
+        "project_name": os.getenv("BENCH_PROJECT_NAME"),
+        "environment": os.getenv("BENCH_ENVIRONMENT"),
+        "ec2_instance_type": os.getenv("BENCH_EC2_INSTANCE_TYPE"),
+        "db_instance_class": os.getenv("BENCH_DB_INSTANCE_CLASS"),
+        "s3_results_bucket": os.getenv("BENCH_RESULTS_BUCKET"),
+        "s3_results_key_prefix": os.getenv("BENCH_RESULTS_KEY_PREFIX"),
+        "app_root": os.getenv("BENCH_APP_ROOT"),
+        "metadata_path": str(metadata_path),
+    }
+
+    infra: dict[str, Any] = {k: v for k, v in file_metadata.items() if v is not None}
+    for key, value in env_metadata.items():
+        if value is not None:
+            infra[key] = value
+    return infra
+
+
+def ts_prefix() -> str:
+    return time.strftime("%H:%M:%S")
+
+
+def log_line(message: str) -> None:
+    print(f"[{ts_prefix()}] {message}")
 
 
 def ensure_dir(path: Path) -> None:
@@ -26,7 +69,7 @@ def write_json(path: Path, obj: dict[str, Any]) -> None:
 
 def run_command(command: list[str], *, env: dict[str, str] | None = None, cwd: Path | None = None) -> None:
     printable = " ".join(shlex.quote(part) for part in command)
-    print(f"[RUN] {printable}")
+    log_line(f"[RUN] {printable}")
     subprocess.run(command, check=True, env=env, cwd=str(cwd) if cwd is not None else None)
 
 
@@ -180,6 +223,7 @@ def main() -> None:
         "replications": args.replications,
         "etl_profiles": etl_profiles,
         "elt_profiles": elt_profiles,
+        "infra": collect_infra_metadata(),
         "volumes": [],
     }
 
@@ -191,7 +235,7 @@ def main() -> None:
             volume_root = results_root / f"des_{nb_des}" / f"rep_{replication_index:02d}"
             ensure_dir(volume_root)
 
-            print(f"[INFO] Preparing dataset for nb_des={nb_des}, replication={replication_index}")
+            log_line(f"[INFO] Preparing dataset for nb_des={nb_des}, replication={replication_index}")
             try:
                 generate_dataset(
                     dataset_path,
@@ -206,13 +250,13 @@ def main() -> None:
                 run_outputs: list[dict[str, Any]] = []
                 for profile in etl_profiles:
                     out_dir = volume_root / f"etl_{profile}"
-                    print(f"[INFO] Running ETL profile={profile} for nb_des={nb_des}, replication={replication_index}")
+                    log_line(f"[INFO] Running ETL profile={profile} for nb_des={nb_des}, replication={replication_index}")
                     run_monitored_benchmark(benchmark_command("etl", profile), "bench-etl", out_dir, dataset_path)
                     run_outputs.append({"family": "etl", "profile": profile, "out": str(out_dir)})
 
                 for profile in elt_profiles:
                     out_dir = volume_root / f"elt_{profile}"
-                    print(f"[INFO] Running ELT profile={profile} for nb_des={nb_des}, replication={replication_index}")
+                    log_line(f"[INFO] Running ELT profile={profile} for nb_des={nb_des}, replication={replication_index}")
                     run_monitored_benchmark(benchmark_command("elt", profile), "bench-elt", out_dir, dataset_path)
                     run_outputs.append({"family": "elt", "profile": profile, "out": str(out_dir)})
 
@@ -225,7 +269,7 @@ def main() -> None:
                     }
                 )
             except Exception as exc:
-                print(f"[ERROR] Failed series run for nb_des={nb_des}, replication={replication_index}: {exc}")
+                log_line(f"[ERROR] Failed series run for nb_des={nb_des}, replication={replication_index}: {exc}")
                 volume_entry["runs"].append(
                     {
                         "replication": replication_index,
@@ -250,9 +294,9 @@ def main() -> None:
         s3_key = f"{s3_key_prefix}/{archive_name}" if s3_key_prefix else archive_name
         with tempfile.TemporaryDirectory(prefix="bench_series_archive_") as tmp_dir:
             archive_path = Path(tmp_dir) / archive_name
-            print(f"[INFO] Creating results archive from {results_root}")
+            log_line(f"[INFO] Creating results archive from {results_root}")
             create_results_archive(results_root, archive_path)
-            print(f"[INFO] Uploading archive to s3://{args.s3_bucket}/{s3_key}")
+            log_line(f"[INFO] Uploading archive to s3://{args.s3_bucket}/{s3_key}")
             upload_archive_to_s3(archive_path, args.s3_bucket, s3_key)
         series_manifest["s3_archive"] = {
             "bucket": args.s3_bucket,
@@ -261,7 +305,7 @@ def main() -> None:
         }
         write_json(results_root / "series_manifest.json", series_manifest)
 
-    print(f"[OK] Series manifest written to {results_root / 'series_manifest.json'}")
+    log_line(f"[OK] Series manifest written to {results_root / 'series_manifest.json'}")
 
 
 if __name__ == "__main__":

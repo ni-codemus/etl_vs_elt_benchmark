@@ -13,6 +13,11 @@ variable "ec2_instance_type" {
   description = "EC2 instance type for the application host"
 }
 
+variable "db_instance_class" {
+  type        = string
+  description = "RDS instance class used by this environment"
+}
+
 variable "ec2_root_volume_gb" {
   type        = number
   description = "Root volume size for the EC2 instance"

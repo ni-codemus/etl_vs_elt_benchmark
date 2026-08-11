@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 import random
 import os
 from dataclasses import dataclass
@@ -40,6 +41,14 @@ def trunc(s: str, max_len: int) -> str:
 def fmt_amount_13(n: Decimal) -> str:
     i = int(n.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     return str(i)[:13]
+
+
+def ts_prefix() -> str:
+    return time.strftime("%H:%M:%S")
+
+
+def log_line(message: str) -> None:
+    print(f"[{ts_prefix()}] {message}")
 
 
 @dataclass
@@ -293,8 +302,8 @@ def generate_dat_file(
     # write trailer and flush remaining buffer
     batch_buf.extend((line_900(nb_fix=total_fix, nb_des=nb_des) + "\n").encode("utf-8"))
     flush_buf()
-    print(f"[OK] Fichier généré: {path}")
-    print(f"[COUNT] DES={nb_des} FIX={total_fix}")
+    log_line(f"[OK] Fichier généré: {path}")
+    log_line(f"[COUNT] DES={nb_des} FIX={total_fix}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -382,11 +391,11 @@ def main() -> None:
     if not args.no_validate:
         ok, errs = validate_generated_file(str(output_file))
         if ok:
-            print("[VALID] Structure et références OK")
+            log_line("[VALID] Structure et références OK")
         else:
-            print("[INVALID]")
+            log_line("[INVALID]")
             for e in errs:
-                print(" -", e)
+                log_line(f" - {e}")
 
 
 if __name__ == "__main__":

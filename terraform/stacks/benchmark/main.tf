@@ -1,33 +1,13 @@
-terraform {
-  required_version = ">= 1.6.0"
-
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-  }
-}
-
-provider "aws" {
-  region = var.aws_region
-}
-
 locals {
-  common_tags = {
-    Project     = var.project_name
-    ManagedBy   = "terraform"
-    Environment = var.environment
-  }
+  common_tags = var.tags
 }
 
 module "network" {
-  source = "./modules/network"
+  source = "../../modules/network"
 
   project_name                  = var.project_name
   environment                   = var.environment
   availability_zone             = var.availability_zone
-  db_instance_class             = var.db_instance_class
   vpc_cidr                      = var.vpc_cidr
   public_subnet_cidr            = var.public_subnet_cidr
   private_subnet_cidr           = var.private_subnet_cidr
@@ -36,7 +16,7 @@ module "network" {
 }
 
 module "database" {
-  source = "./modules/database"
+  source = "../../modules/database"
 
   project_name          = var.project_name
   environment           = var.environment
@@ -53,7 +33,7 @@ module "database" {
 }
 
 module "compute" {
-  source = "./modules/compute"
+  source = "../../modules/compute"
 
   project_name          = var.project_name
   environment           = var.environment
@@ -74,5 +54,7 @@ module "compute" {
   pg_super_pass         = var.pg_super_pass
   pg_app_etl            = var.pg_app_etl
   pg_app_elt            = var.pg_app_elt
+  s3_results_bucket     = var.s3_results_bucket
+  s3_results_key_prefix = var.s3_results_key_prefix
   tags                  = local.common_tags
 }

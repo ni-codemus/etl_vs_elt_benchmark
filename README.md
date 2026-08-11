@@ -185,6 +185,32 @@ aws ssm start-session --target <ec2_instance_id>
 
 Terraform renseigne ensuite `configs/.env` sur l'instance avec `PG_HOST` pointant vers le RDS, `PG_PORT=5432`, et les identifiants PostgreSQL du projet.
 
+Pour le développement local, `configs/.env` garde `PG_SSLMODE=disable` afin de pouvoir tester avec un PostgreSQL local sans TLS. Sur l'EC2, le bootstrap Terraform force `PG_SSLMODE=require` pour conserver une connexion chiffrée vers RDS.
+
+### Environnements Terraform indépendants
+
+Pour comparer plusieurs tailles d'infrastructure sans partager le même state, le dépôt contient désormais 4 environnements séparés sous [terraform/envs](terraform/envs):
+
+- [terraform/envs/small](terraform/envs/small) : EC2 `t3.small` + RDS `db.t3.micro`
+- [terraform/envs/ec2-large-rds-small](terraform/envs/ec2-large-rds-small) : EC2 `m6i.large` + RDS `db.t3.micro`
+- [terraform/envs/ec2-small-rds-large](terraform/envs/ec2-small-rds-large) : EC2 `t3.small` + RDS `db.m6g.large`
+- [terraform/envs/ec2-m6i-xlarge-rds-m6g-xlarge](terraform/envs/ec2-m6i-xlarge-rds-m6g-xlarge) : EC2 `m6i.xlarge` + RDS `db.m6g.xlarge`
+- [terraform/envs/ec2-large-rds-xlarge](terraform/envs/ec2-large-rds-xlarge) : EC2 `m6i.large` + RDS `db.m6g.xlarge`
+- [terraform/envs/ec2-xlarge-rds-large](terraform/envs/ec2-xlarge-rds-large) : EC2 `m6i.xlarge` + RDS `db.m6g.large`
+
+Chaque dossier a son propre state local, donc tu peux détruire un environnement sans toucher aux autres. Les archives de résultats peuvent toutes écrire dans le même bucket S3, mais avec un préfixe différent par environnement pour éviter les collisions.
+
+Exemple d'utilisation:
+
+```bash
+cd terraform/envs/small
+cp terraform.tfvars.example terraform.tfvars
+terraform init
+terraform apply
+```
+
+Tu peux faire la même chose pour les autres dossiers `envs/*`. Pour supprimer un environnement, lance simplement `terraform destroy` dans son dossier à lui.
+
 ## CI Terraform
 
 Un workflow GitHub Actions est disponible dans [.github/workflows/terraform.yml](.github/workflows/terraform.yml). Il exécute `terraform fmt -check`, `terraform init -backend=false` et `terraform validate` sur chaque push ou pull request qui touche le dossier `terraform/`.

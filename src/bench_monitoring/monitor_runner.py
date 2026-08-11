@@ -31,6 +31,14 @@ def mb(x: int) -> float:
     return x / (1024 * 1024)
 
 
+def ts_prefix() -> str:
+    return time.strftime("%H:%M:%S")
+
+
+def log_line(message: str) -> None:
+    print(f"[{ts_prefix()}] {message}")
+
+
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
@@ -153,7 +161,7 @@ class PgMonitor:
             self.conn.autocommit = True
             self.enabled = True
         except Exception as e:
-            print(f"[WARN] PG monitor disabled: {e}")
+            log_line(f"[WARN] PG monitor disabled: {e}")
             self.enabled = False
 
     def stop(self):
@@ -438,13 +446,13 @@ def monitor_command(cmd: str, out_dir: str, sample_interval: float = 0.2, db_dsn
     phase_summary_path = os.path.join(run_dir, "phase_times.json")
     env["BENCH_PHASE_TIMES_PATH"] = phase_summary_path
 
-    print(f"[INFO] Launch: {cmd}")
-    print(f"[INFO] Run dir: {run_dir}")
-    print(f"[INFO] PG application_name tag expected: {app_name}")
+    log_line(f"[INFO] Launch: {cmd}")
+    log_line(f"[INFO] Run dir: {run_dir}")
+    log_line(f"[INFO] PG application_name tag expected: {app_name}")
     if effective_dsn:
-        print("[INFO] PostgreSQL monitoring connection: enabled")
+        log_line("[INFO] PostgreSQL monitoring connection: enabled")
     else:
-        print("[WARN] PostgreSQL monitoring connection: disabled (missing --dsn/DB_DSN and PG_* env vars)")
+        log_line("[WARN] PostgreSQL monitoring connection: disabled (missing --dsn/DB_DSN and PG_* env vars)")
 
     proc_sub = subprocess.Popen(shlex.split(cmd), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
     target_proc = psutil.Process(proc_sub.pid)
@@ -476,6 +484,8 @@ def monitor_command(cmd: str, out_dir: str, sample_interval: float = 0.2, db_dsn
 
     t0 = time.perf_counter()
     samples: List[Sample] = []
+    last_heartbeat = t0
+    heartbeat_interval_sec = max(10.0, sample_interval * 300)
     while True:
         alive = proc_sub.poll() is None
         ts = time.time()
@@ -508,6 +518,13 @@ def monitor_command(cmd: str, out_dir: str, sample_interval: float = 0.2, db_dsn
             db_query_age_sec=dbm.get("db_query_age_sec"),
         ))
 
+        if t_rel - (last_heartbeat - t0) >= heartbeat_interval_sec:
+            log_line(
+                f"[INFO] Still running: cmd={cmd!r} elapsed={t_rel:.1f}s samples={len(samples)} "
+                f"target_alive={pm['target_alive']}"
+            )
+            last_heartbeat = time.perf_counter()
+
         if not alive:
             break
         time.sleep(sample_interval)
@@ -530,13 +547,13 @@ def monitor_command(cmd: str, out_dir: str, sample_interval: float = 0.2, db_dsn
         f.writelines(stderr_lines)
 
     exit_prefix = "[OK]" if exit_code == 0 else "[ERROR]"
-    print(f"{exit_prefix} exit_code={exit_code}")
-    print(f"[OK] {os.path.join(run_dir, 'timeseries.csv')}")
+    log_line(f"{exit_prefix} exit_code={exit_code}")
+    log_line(f"[OK] {os.path.join(run_dir, 'timeseries.csv')}")
     if phase_summary:
-        print(f"[OK] {phase_summary_path}")
-    print(f"[OK] {os.path.join(run_dir, 'summary.json')}")
-    print(f"[OK] {os.path.join(run_dir, 'stdout.log')}")
-    print(f"[OK] {os.path.join(run_dir, 'stderr.log')}")
+        log_line(f"[OK] {phase_summary_path}")
+    log_line(f"[OK] {os.path.join(run_dir, 'summary.json')}")
+    log_line(f"[OK] {os.path.join(run_dir, 'stdout.log')}")
+    log_line(f"[OK] {os.path.join(run_dir, 'stderr.log')}")
 
 
 def main() -> None:

@@ -412,46 +412,56 @@ def main(argv: list[str] | None = None, *, default_profile: str = "baseline") ->
     constraints_optimization_enabled = False
 
     if admin_db is not None:
-        with db as conn, admin_db as admin_conn:
-            with conn.cursor() as cur, admin_conn.cursor() as admin_cur:
+        with admin_db as admin_conn:
+            with admin_conn.cursor() as admin_cur:
                 constraints_optimization_enabled = can_disable_target_constraints(admin_cur, logger)
                 if profile.disable_constraints and not constraints_optimization_enabled:
                     logger.info("ELT profile %s will continue without constraint optimization", profile.name)
                 if profile.disable_constraints and constraints_optimization_enabled:
                     record_phase(phase_times, logger, profile, "disable_constraints", lambda: disable_target_constraints(admin_cur))
-                record_phase(phase_times, logger, profile, "truncate_target_tables", lambda: cur.execute("TRUNCATE TABLE tmp_des, tmp_fix, tmp_var, tmp_seuil"))  # type: ignore[arg-type]
-                if profile.work_mem_mb is not None or profile.temp_buffers_mb is not None or profile.maintenance_work_mem_mb is not None or profile.synchronous_commit_off or profile.jit_off:
-                    record_phase(phase_times, logger, profile, "session_prelude", lambda: apply_session_prelude(cur, profile))
-                record_phase(
-                    phase_times,
-                    logger,
-                    profile,
-                    "create_staging_raw",
-                    lambda: cur.execute(
-                        "CREATE TEMP TABLE staging_raw("
-                        "line_number BIGINT GENERATED ALWAYS AS IDENTITY,"
-                        "type TEXT, col1 TEXT, col2 TEXT, col3 TEXT, col4 TEXT, col5 TEXT, col6 TEXT, col7 TEXT, col8 TEXT, col9 TEXT, col10 TEXT, col11 TEXT, col12 TEXT, col13 TEXT, col14 TEXT, col15 TEXT, colnull TEXT"
-                        ") ON COMMIT DROP;"
-                    ),
-                )  # type: ignore[arg-type]
+                    admin_conn.commit()
 
-                expected_pipes = 16
-                copy_freeze_clause = ", FREEZE" if profile.copy_freeze else ""
-                record_phase(
-                    phase_times,
-                    logger,
-                    profile,
-                    "copy_into_staging_raw",
-                    lambda: _copy_into_staging(cur, source_file, expected_pipes, copy_freeze_clause, profile.batch_size),
-                )  # type: ignore[arg-type]
+                try:
+                    with db as conn:
+                        with conn.cursor() as cur:
+                            record_phase(phase_times, logger, profile, "truncate_target_tables", lambda: cur.execute("TRUNCATE TABLE tmp_des, tmp_fix, tmp_var, tmp_seuil"))  # type: ignore[arg-type]
+                            if profile.work_mem_mb is not None or profile.temp_buffers_mb is not None or profile.maintenance_work_mem_mb is not None or profile.synchronous_commit_off or profile.jit_off:
+                                record_phase(phase_times, logger, profile, "session_prelude", lambda: apply_session_prelude(cur, profile))
+                            record_phase(
+                                phase_times,
+                                logger,
+                                profile,
+                                "create_staging_raw",
+                                lambda: cur.execute(
+                                    "CREATE TEMP TABLE staging_raw("
+                                    "line_number BIGINT GENERATED ALWAYS AS IDENTITY,"
+                                    "type TEXT, col1 TEXT, col2 TEXT, col3 TEXT, col4 TEXT, col5 TEXT, col6 TEXT, col7 TEXT, col8 TEXT, col9 TEXT, col10 TEXT, col11 TEXT, col12 TEXT, col13 TEXT, col14 TEXT, col15 TEXT, colnull TEXT"
+                                    ") ON COMMIT DROP;"
+                                ),
+                            )  # type: ignore[arg-type]
 
-                if profile.analyze_after_copy:
-                    record_phase(phase_times, logger, profile, "analyze_staging_raw", lambda: cur.execute("ANALYZE staging_raw"))  # type: ignore[arg-type]
+                            expected_pipes = 16
+                            copy_freeze_clause = ", FREEZE" if profile.copy_freeze else ""
+                            record_phase(
+                                phase_times,
+                                logger,
+                                profile,
+                                "copy_into_staging_raw",
+                                lambda: _copy_into_staging(cur, source_file, expected_pipes, copy_freeze_clause, profile.batch_size),
+                            )  # type: ignore[arg-type]
 
-                record_phase(phase_times, logger, profile, "transform_and_load", lambda: cur.execute(sql_script))  # type: ignore[arg-type]
+                            if profile.analyze_after_copy:
+                                record_phase(phase_times, logger, profile, "analyze_staging_raw", lambda: cur.execute("ANALYZE staging_raw"))  # type: ignore[arg-type]
 
-                if profile.disable_constraints and constraints_optimization_enabled:
-                    record_phase(phase_times, logger, profile, "enable_constraints", lambda: enable_target_constraints(admin_cur))
+                            record_phase(phase_times, logger, profile, "transform_and_load", lambda: cur.execute(sql_script))  # type: ignore[arg-type]
+                finally:
+                    if profile.disable_constraints and constraints_optimization_enabled:
+                        try:
+                            record_phase(phase_times, logger, profile, "enable_constraints", lambda: enable_target_constraints(admin_cur))
+                            admin_conn.commit()
+                        except Exception:
+                            admin_conn.rollback()
+                            raise
     else:
         with db as conn:
             with conn.cursor() as cur:

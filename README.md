@@ -124,6 +124,7 @@ bench-monitor-series --nb-des 30 100 300 --replications 3 --results-root ./resul
 ```
 
 Chaque réplication utilise une graine différente mais reproductible, et les résultats sont rangés par volume puis par réplication.
+Le fichier de dataset brut est supprimé automatiquement après chaque réplication, une fois tous les profils ETL et ELT terminés.
 
 Par défaut, la fin de `bench-monitor-series` crée une archive `.tar.gz` du répertoire de résultats de la série, supprime l'objet S3 cible s'il existe déjà, puis l'envoie vers le bucket `my-tfstate-project1-nicode-202506`.
 

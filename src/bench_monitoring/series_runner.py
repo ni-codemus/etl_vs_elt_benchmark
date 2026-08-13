@@ -160,6 +160,13 @@ def generate_dataset(
     run_command(command, cwd=project_root)
 
 
+def delete_dataset(dataset_path: Path) -> None:
+    if not dataset_path.exists():
+        return
+    dataset_path.unlink()
+    log_line(f"[INFO] Deleted dataset {dataset_path}")
+
+
 def replication_seed(base_seed: int, replication_index: int) -> int:
     return base_seed + replication_index
 
@@ -283,6 +290,8 @@ def main() -> None:
                     series_manifest["volumes"].append(volume_entry)
                     write_json(results_root / "series_manifest.json", series_manifest)
                     raise
+            finally:
+                delete_dataset(dataset_path)
 
         series_manifest["volumes"].append(volume_entry)
 
